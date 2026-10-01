@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<!-- Pilot_3 live dashboard. Served by tools/pilot3_dashboard.py, which also
+     pushes telemetry JSON over WebSocket. No build step, no dependencies. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pilot_3 Dashboard</title>
+<style>
+  :root {
+    --bg: #101418; --card: #1a2028; --edge: #2a323d;
+    --fg: #d7dee6; --dim: #7d8894; --accent: #4fc3f7;
+    --ok: #66bb6a; --warn: #ffb74d; --bad: #ef5350;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; background: var(--bg); color: var(--fg);
+    font: 14px/1.4 "Segoe UI", system-ui, sans-serif;
+  }
+  header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 16px; }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  #status { font-size: 13px; color: var(--dim); }
+  #status .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+                 margin-right: 5px; background: var(--bad); }
+  #status.live .dot { background: var(--ok); }
+  #status.stale .dot { background: var(--warn); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+  .card { background: var(--card); border: 1px solid var(--edge); border-radius: 8px; padding: 14px 16px; }
+  .card h2 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase;
+             letter-spacing: .08em; color: var(--dim); font-weight: 600; }
+  .readouts { display: flex; gap: 24px; flex-wrap: wrap; }
+  .readout .val { font: 600 26px/1.1 "Consolas", monospace; }
+  .readout .lbl { color: var(--dim); font-size: 12px; margin-top: 2px; }
+  .readout .val small { font-size: 13px; color: var(--dim); font-weight: 400; }
+  canvas { display: block; margin: 0 auto 10px; }
+  .stats { color: var(--dim); font-size: 12px; margin-bottom: 10px; font-family: Consolas, monospace; }
+  .ch { display: grid; grid-template-columns: 44px 1fr 52px; align-items: center; gap: 8px; margin: 3px 0; }
+  .ch .name { color: var(--dim); font-size: 12px; font-family: Consolas, monospace; }
+  .ch .bar { height: 10px; background: #0c0f13; border-radius: 5px; overflow: hidden; }
+  .ch .bar i { display: block; height: 100%; width: 0; background: var(--accent);
+               border-radius: 5px; transition: width .08s linear; }
+  .ch .num { font: 12px Consolas, monospace; text-align: right; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Pilot_3</h1>
+  <span id="status"><span class="dot"></span><span id="status-text">connecting…</span></span>
+</header>
+
+<div class="grid">
+  <section class="card">
+    <h2>Attitude (IMU)</h2>
+    <canvas id="horizon" width="260" height="200"></canvas>
+    <div class="readouts">
+      <div class="readout"><div class="val" id="roll">–</div><div class="lbl">Roll</div></div>
+      <div class="readout"><div class="val" id="pitch">–</div><div class="lbl">Pitch</div></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Barometer</h2>
+    <div class="readouts">
+      <div class="readout"><div class="val" id="baro-t">–</div><div class="lbl">Temperature</div></div>
+      <div class="readout"><div class="val" id="baro-p">–</div><div class="lbl">Pressure</div></div>
+      <div class="readout"><div class="val" id="baro-a">–</div><div class="lbl">Altitude</div></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>GPS (u-blox)</h2>
+    <div class="readouts">
+      <div class="readout"><div class="val" id="gps-fix">–</div><div class="lbl">Fix</div></div>
+      <div class="readout"><div class="val" id="gps-sats">–</div><div class="lbl">Satellites</div></div>
+    </div>
+    <div class="readouts" style="margin-top:12px">
+      <div class="readout"><div class="val" id="gps-lat">–</div><div class="lbl">Latitude</div></div>
+      <div class="readout"><div class="val" id="gps-lon">–</div><div class="lbl">Longitude</div></div>
+    </div>
+    <div class="readouts" style="margin-top:12px">
+      <div class="readout"><div class="val" id="gps-alt">–</div><div class="lbl">Altitude (MSL)</div></div>
+      <div class="readout"><div class="val" id="gps-spd">–</div><div class="lbl">Ground speed</div></div>
+      <div class="readout"><div class="val" id="gps-crs">–</div><div class="lbl">Course</div></div>
+    </div>
+    <div class="stats" id="gps-stats" style="margin-top:12px">–</div>
+  </section>
+
+  <section class="card">
+    <h2>Transmitter (IBUS)</h2>
+    <div class="stats" id="ibus-stats">–</div>
+    <div id="channels"></div>
+    <div class="readouts" style="margin-top:12px">
+      <div class="readout"><div class="val" id="pwm-s1">–</div><div class="lbl">PWM S1</div></div>
+      <div class="readout"><div class="val" id="pwm-s4">–</div><div class="lbl">PWM S4</div></div>
+    </div>
+  </section>
+</div>
+
+<script>
+const WS_URL = "ws://" + location.hostname + ":__WS_PORT__";
+const CH_MIN = 800, CH_MAX = 2200;  // IBUS pulse range for bar scaling
+
+// u-blox UBX fixType values
+const GPS_FIX = { 0: "No fix", 1: "Dead reckoning", 2: "2D", 3: "3D", 4: "GNSS + DR", 5: "Time only" };
+
+const statusEl =document.getElementById("status");
+const statusText = document.getElementById("status-text");
+const channelsEl = document.getElementById("channels");
+const horizon = document.getElementById("horizon").getContext("2d");
+
+// Pre-build one row per channel; rows are reused on every update.
+const chRows = [];
+for (let i = 0; i < 14; i++) {
+  const row = document.createElement("div");
+  row.className = "ch";
+  row.innerHTML = `<span class="name">CH${i + 1}</span><span class="bar"><i></i></span><span class="num">–</span>`;
+  channelsEl.appendChild(row);
+  chRows.push({ bar: row.querySelector("i"), num: row.querySelector(".num") });
+}
+
+function fmt(v, digits, unit) {
+  return v.toFixed(digits) + (unit ? `<small> ${unit}</small>` : "");
+}
+function signedFmt(v, digits, unit) {
+  return (v >= 0 ? "+" : "") + fmt(v, digits, unit);
+}
+
+function drawHorizon(rollDeg, pitchDeg) {
+  const ctx = horizon, W = 260, H = 200, cx = W / 2, cy = H / 2;
+  const pxPerDeg = 2.2;  // pitch scale
+  ctx.clearRect(0, 0, W, H);
+  ctx.save();
+  ctx.beginPath(); ctx.arc(cx, cy, 95, 0, 2 * Math.PI); ctx.clip();
+  ctx.translate(cx, cy);
+  ctx.rotate(-rollDeg * Math.PI / 180);
+  ctx.translate(0, pitchDeg * pxPerDeg);
+  // sky / ground
+  ctx.fillStyle = "#1e3a5f"; ctx.fillRect(-200, -200, 400, 200);
+  ctx.fillStyle = "#4a3220"; ctx.fillRect(-200, 0, 400, 200);
+  ctx.strokeStyle = "#d7dee6"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(-200, 0); ctx.lineTo(200, 0); ctx.stroke();
+  ctx.restore();
+  // fixed aircraft reference mark
+  ctx.strokeStyle = "#ffb74d"; ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(cx - 30, cy); ctx.lineTo(cx - 10, cy); ctx.lineTo(cx, cy + 8);
+  ctx.lineTo(cx + 10, cy); ctx.lineTo(cx + 30, cy);
+  ctx.stroke();
+  // bezel
+  ctx.strokeStyle = "#2a323d"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(cx, cy, 95, 0, 2 * Math.PI); ctx.stroke();
+}
+
+function setStatus(cls, text) {
+  statusEl.className = cls;
+  statusText.textContent = text;
+}
+
+function update(m) {
+  if (!m.connected) {
+    setStatus("", m.error || "waiting for device…");
+    return;
+  }
+  setStatus(m.stale ? "stale" : "live",
+            (m.stale ? "STALE — firmware not running? " : "live ") + `seq ${m.seq}`);
+
+  drawHorizon(m.roll_deg, m.pitch_deg);
+  document.getElementById("roll").innerHTML  = signedFmt(m.roll_deg, 2, "°");
+  document.getElementById("pitch").innerHTML = signedFmt(m.pitch_deg, 2, "°");
+
+  document.getElementById("baro-t").innerHTML = signedFmt(m.baro_temp_c, 2, "°C");
+  document.getElementById("baro-p").innerHTML = fmt(m.baro_pressure_pa / 100, 2, "hPa");
+  document.getElementById("baro-a").innerHTML = signedFmt(m.baro_altitude_m, 2, "m");
+
+  if (m.gps) {
+    const g = m.gps;
+    const hasFix = g.fix >= 2;
+    document.getElementById("gps-fix").innerHTML =
+      `<span style="color:var(--${hasFix ? "ok" : "warn"})">${GPS_FIX[g.fix] || "type " + g.fix}</span>`;
+    document.getElementById("gps-sats").textContent = g.sats;
+    document.getElementById("gps-lat").innerHTML = hasFix ? signedFmt(g.lat_deg, 7, "°") : "–";
+    document.getElementById("gps-lon").innerHTML = hasFix ? signedFmt(g.lon_deg, 7, "°") : "–";
+    document.getElementById("gps-alt").innerHTML = hasFix ? fmt(g.alt_m, 1, "m") : "–";
+    document.getElementById("gps-spd").innerHTML = hasFix ? fmt(g.speed_mps, 1, "m/s") : "–";
+    document.getElementById("gps-crs").innerHTML = hasFix ? fmt(g.course_deg, 1, "°") : "–";
+    document.getElementById("gps-stats").textContent =
+      `rx ${g.rx_bytes} B   frames ok ${g.sentences_ok}   bad ${g.sentences_bad}`;
+  }
+
+  document.getElementById("ibus-stats").textContent =
+    `rx ${m.ibus_rx_bytes} B   frames ok ${m.ibus_frames_ok}   bad ${m.ibus_frames_bad}`;
+  m.ibus_ch.forEach((v, i) => {
+    const pct = Math.max(0, Math.min(1, (v - CH_MIN) / (CH_MAX - CH_MIN)));
+    chRows[i].bar.style.width = (pct * 100).toFixed(1) + "%";
+    chRows[i].num.textContent = v;
+  });
+  document.getElementById("pwm-s1").innerHTML = fmt(m.pwm_s1_us, 0, "µs");
+  document.getElementById("pwm-s4").innerHTML = fmt(m.pwm_s4_us, 0, "µs");
+}
+
+// Connect, and reconnect automatically whenever the socket drops.
+function connect() {
+  const ws = new WebSocket(WS_URL);
+  ws.onopen = () => setStatus("", "connected, waiting for data…");
+  ws.onmessage = (e) => update(JSON.parse(e.data));
+  ws.onclose = () => { setStatus("", "server disconnected — retrying…"); setTimeout(connect, 1000); };
+  ws.onerror = () => ws.close();
+}
+connect();
+</script>
+</body>
+</html>
