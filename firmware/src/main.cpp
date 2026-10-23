@@ -51,6 +51,21 @@ void delay_ms(uint32_t ms) {
     }
 }
 
+// Stick deflection in us around center. Invalid/uninitialized input (0 or
+// out of [900, 2100]) counts as centered, matching the servo neutral failsafe.
+int16_t stick_offset_us(uint16_t ch_us) {
+    if (ch_us < 900 || ch_us > 2100) return 0;
+    return static_cast<int16_t>(ch_us) - 1500;
+}
+
+// Center + offset, clamped to the 1000-2000 us servo range.
+uint16_t mix_us(int16_t offset_us) {
+    int16_t v = 1500 + offset_us;
+    if (v < 1000) v = 1000;
+    if (v > 2000) v = 2000;
+    return static_cast<uint16_t>(v);
+}
+
 }  // namespace
 
 int main() {
@@ -110,8 +125,15 @@ int main() {
         ibus::read_channels(ch);
         for (int i = 0; i < ibus::kNumChannels; ++i) g_telemetry.ibus_ch[i] = ch[i];
 
-        g_telemetry.pwm_s1_us = servo_pwm::set_s1_us(ch[0]);
-        g_telemetry.pwm_s4_us = servo_pwm::set_s4_us(ch[1]);
+        // Ruddervator (V-tail) mix: elevator = ch1, rudder = ch2 (ch3 = throttle). Signs are
+        // bench-verified on hardware; the servos are mounted mirrored, so
+        // the signs are not interchangeable between S1 and S4.
+        int16_t elev = stick_offset_us(ch[0]);
+        int16_t rud  = stick_offset_us(ch[1]);
+        g_telemetry.pwm_s1_us = servo_pwm::set_s1_us(mix_us(-elev + rud));
+        g_telemetry.pwm_s4_us = servo_pwm::set_s4_us(mix_us(-elev - rud));
+        // Throttle = iBus channel 3 (index 2) -> ESC on PWM_S2.
+        servo_pwm::set_s2_motor_us(ch[2]);
 
         gps::poll();
         gps::Stats gps_stats = gps::snapshot();

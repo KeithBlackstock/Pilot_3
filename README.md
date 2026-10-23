@@ -6,7 +6,7 @@ Bare-metal C++ firmware (no HAL) for a "blue pill"-style flight-controller board
 - Baro: BMP280 on I2C1
 - RC input: FlySky iBus on USART3
 - GPS: u-blox M10, UBX-NAV-PVT on USART1
-- Servo outputs: TIM2/TIM3 PWM (currently RC pass-through)
+- Servo outputs: TIM2/TIM3 PWM -- V-tail ruddervator mix on PWM_S1/S4 (elevator ch1, rudder ch2), ESC throttle on PWM_S2 (ch3)
 
 ## Layout
 

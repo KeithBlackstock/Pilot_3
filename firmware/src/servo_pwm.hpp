@@ -23,4 +23,10 @@ void init();
 uint16_t set_s1_us(uint16_t pulse_us);
 uint16_t set_s4_us(uint16_t pulse_us);
 
+// ESC/motor on PWM_S2 (PA7, TIM3_CH2 -- shares TIM3 and its 50 Hz frame with
+// S1; PA7 is in GPIOA_CRL, so PA15/CRH/AFIO are still untouched). Same
+// 1000-2000 us protocol, but invalid input (0, out of [1000, 2000]) fails to
+// 1000 us = motor off, never to neutral.
+uint16_t set_s2_motor_us(uint16_t pulse_us);
+
 }  // namespace servo_pwm
