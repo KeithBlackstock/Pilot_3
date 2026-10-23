@@ -15,6 +15,9 @@ public:
         float accel_roll_deg  = std::atan2(ay_g, az_g) * kRadToDeg;
         float accel_pitch_deg = std::atan2(-ax_g, std::sqrt(ay_g * ay_g + az_g * az_g)) * kRadToDeg;
 
+        accel_roll_deg_  = accel_roll_deg;
+        accel_pitch_deg_ = accel_pitch_deg;
+
         roll_deg_  = kAlpha * (roll_deg_ + gx_dps * dt_s) + (1.0f - kAlpha) * accel_roll_deg;
         pitch_deg_ = kAlpha * (pitch_deg_ + gy_dps * dt_s) + (1.0f - kAlpha) * accel_pitch_deg;
     }
@@ -22,8 +25,14 @@ public:
     float roll_deg() const { return roll_deg_; }
     float pitch_deg() const { return pitch_deg_; }
 
+    // Raw accel-derived angles from the most recent update() (no gyro).
+    float accel_roll_deg() const { return accel_roll_deg_; }
+    float accel_pitch_deg() const { return accel_pitch_deg_; }
+
 private:
     static constexpr float kAlpha = 0.98f;
     float roll_deg_  = 0.0f;
     float pitch_deg_ = 0.0f;
+    float accel_roll_deg_  = 0.0f;
+    float accel_pitch_deg_ = 0.0f;
 };

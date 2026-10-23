@@ -8,6 +8,7 @@
 //
 // Assumes post-reset clocks (HSI 8 MHz, PCLK1 = 8 MHz), same as
 // pilot3_swd_probe.py -- no RCC_CFGR changes.
+#include "attitude_level.hpp"
 #include "bmp280.hpp"
 #include "complementary_filter.hpp"
 #include "gps.hpp"
@@ -25,13 +26,18 @@ namespace {
 
 constexpr uint32_t kSysClockHz = 8'000'000;
 constexpr float kLoopHz = 200.0f;
-constexpr uint32_t kLoopReload =
-    static_cast<uint32_t>(kSysClockHz / kLoopHz) - 1;
-constexpr float kLoopDtS = 1.0f / kLoopHz;
+constexpr uint32_t kLoopTicks = static_cast<uint32_t>(kSysClockHz / kLoopHz);
+constexpr uint32_t kSysTickMask = 0x00FFFFFF;  // SysTick is a 24-bit down-counter
 
-// BMP280 read blocks for a few ms (forced-mode conversion) -- too slow to
-// do every 5 ms tick, so it only runs on every Nth iteration (~10 Hz).
+// A new BMP280 cycle is requested on every Nth iteration (~10 Hz); the read
+// itself is non-blocking and spread over the following ticks (bmp280::step).
 constexpr uint32_t kBaroEveryN = static_cast<uint32_t>(kLoopHz / 10.0f);
+
+// iBus staleness: if no new valid frame arrives for this many loop
+// iterations (>= 40 * 5 ms = 200 ms; longer when a baro read stretches an
+// iteration, iBus normally sends a frame every ~7 ms), the RX is considered
+// dropped and the motor is cut.
+constexpr uint32_t kIbusStaleLoops = 40;
 
 // Busy-wait one SysTick period. No TICKINT/NVIC involved -- just polls
 // COUNTFLAG, which is cleared by hardware on read.
@@ -43,6 +49,17 @@ void systick_wait_one_period(uint32_t reload) {
     }
     mmio(SYST_CSR) = 0;
 }
+
+// Free-running SysTick (wraps every ~2.1 s) used to measure the real loop
+// period. Only valid after delay_ms() is done with the one-shot mode.
+void systick_start_free_running() {
+    mmio(SYST_CSR) = 0;
+    mmio(SYST_RVR) = kSysTickMask;
+    mmio(SYST_CVR) = 0;
+    mmio(SYST_CSR) = SYST_CSR_ENABLE | SYST_CSR_CLKSOURCE;
+}
+
+uint32_t systick_now() { return mmio(SYST_CVR) & kSysTickMask; }
 
 void delay_ms(uint32_t ms) {
     constexpr uint32_t kOneMsReload = kSysClockHz / 1000 - 1;
@@ -98,19 +115,34 @@ int main() {
 
     ComplementaryFilter filter;
     uint32_t loop_count = 0;
+    systick_start_free_running();
+    uint32_t last_tick = systick_now();
+    uint32_t last_frames_ok = 0;
+    uint32_t loops_since_frame = kIbusStaleLoops;  // start stale until a frame arrives
 
     while (true) {
-        systick_wait_one_period(kLoopReload);
+        // Wait until at least one loop period has elapsed since the last
+        // iteration; if a slow iteration (e.g. a baro read) overran, this
+        // falls straight through. The filter gets the measured dt, so overruns
+        // don't under-integrate the gyro. SysTick counts down.
+        uint32_t now_tick;
+        uint32_t elapsed;
+        do {
+            now_tick = systick_now();
+            elapsed = (last_tick - now_tick) & kSysTickMask;
+        } while (elapsed < kLoopTicks);
+        last_tick = now_tick;
+        float dt_s = static_cast<float>(elapsed) / static_cast<float>(kSysClockHz);
 
         icm::Sample s = icm::read();
         filter.update(s.accel_g[0], s.accel_g[1], s.accel_g[2],
-                      s.gyro_dps[0], s.gyro_dps[1], kLoopDtS);
+                      s.gyro_dps[0], s.gyro_dps[1], dt_s);
 
         g_telemetry.roll_deg  = filter.roll_deg();
         g_telemetry.pitch_deg = filter.pitch_deg();
 
-        if (baro_ok && (loop_count % kBaroEveryN) == 0) {
-            bmp280::Reading r    = bmp280::read();
+        bmp280::Reading r;
+        if (baro_ok && bmp280::step((loop_count % kBaroEveryN) == 0, r)) {
             g_telemetry.baro_temp_c      = r.temperature_c;
             g_telemetry.baro_pressure_pa = r.pressure_pa;
             g_telemetry.baro_altitude_m  = r.altitude_m;
@@ -125,15 +157,37 @@ int main() {
         ibus::read_channels(ch);
         for (int i = 0; i < ibus::kNumChannels; ++i) g_telemetry.ibus_ch[i] = ch[i];
 
+        // RX staleness (no new valid iBus frame for kIbusStaleLoops ticks).
+        if (ibus_stats.frames_ok != last_frames_ok) {
+            last_frames_ok = ibus_stats.frames_ok;
+            loops_since_frame = 0;
+        } else if (loops_since_frame < kIbusStaleLoops) {
+            loops_since_frame++;
+        }
+        bool rx_stale = loops_since_frame >= kIbusStaleLoops;
+
         // Ruddervator (V-tail) mix: elevator = ch1, rudder = ch2 (ch3 = throttle). Signs are
         // bench-verified on hardware; the servos are mounted mirrored, so
         // the signs are not interchangeable between S1 and S4.
         int16_t elev = stick_offset_us(ch[0]);
         int16_t rud  = stick_offset_us(ch[1]);
+
+        // CH6 (Mode) > 1500 enables the accelerometer-only leveler. If either
+        // stick is outside its deadband the loop lets go of BOTH axes and
+        // passes the pilot's commands through; with both sticks centered (or
+        // the RX stale) it drives pitch and roll level. Invalid CH6
+        // (0 / out of range) leaves it off.
+        bool stabilize = ch[5] > 1500 && ch[5] <= 2100;
+        if (stabilize && (rx_stale || (attitude_level::hands_off(elev) &&
+                                       attitude_level::hands_off(rud)))) {
+            elev = static_cast<int16_t>(attitude_level::pitch(filter.accel_pitch_deg()));
+            rud  = static_cast<int16_t>(attitude_level::roll(filter.accel_roll_deg()));
+        }
         g_telemetry.pwm_s1_us = servo_pwm::set_s1_us(mix_us(-elev + rud));
         g_telemetry.pwm_s4_us = servo_pwm::set_s4_us(mix_us(-elev - rud));
-        // Throttle = iBus channel 3 (index 2) -> ESC on PWM_S2.
-        servo_pwm::set_s2_motor_us(ch[2]);
+        // Throttle = iBus channel 3 (index 2) -> ESC on PWM_S2. Cut to off
+        // if the RX has gone quiet; servos keep their last position.
+        servo_pwm::set_s2_motor_us(rx_stale ? 0 : ch[2]);
 
         gps::poll();
         gps::Stats gps_stats = gps::snapshot();

@@ -35,6 +35,20 @@ Failsafe behavior:
 
 - Servo inputs that are invalid (0 or outside 900-2100 us) count as centered (1500 us).
 - ESC input that is invalid (0 or outside 1000-2000 us) fails to 1000 us, motor off, including at boot before the first iBus frame.
+- If no valid iBus frame arrives for ~200 ms, the motor is cut to 1000 us; it resumes when frames return.
+
+### Attitude loop (CH6 stabilize mode)
+
+CH6 (Mode) > 1500 enables an accelerometer-only wing-leveler (`firmware/src/attitude_level.hpp`):
+
+- **Input:** the raw accel-derived pitch and roll angles. No gyro rate, no fused filter output, no integrator.
+- **Control law:** proportional only. Each axis outputs `-sign * Kp * angle` (4 us per degree), limited to +-250 us. Pitch acts through the elevator channel and roll through the rudder channel, since in this 3CH scheme yaw induces roll.
+- **Pilot override:** if either stick (CH1 or CH2) is outside a +-30 us deadband, the loop lets go of both axes and the pilot's commands pass straight through to the ruddervator mix. With both sticks centered, it drives both axes toward level.
+- **Off / failsafe:** below 1500, or with CH6 missing or invalid, the sticks always pass straight through. If the RX goes stale while the mode is on, both axes level (the motor is cut separately).
+
+The design prioritizes testability over ideal function. Being stateless, proportional-only and driven by one raw sensor, it is trivial to reason about and to verify on the bench: tilt the airframe and watch the surfaces oppose it. The cost is real. Raw accel angles are corrupted by sustained acceleration (turns, climbs) and vibration, and with no rate damping a higher gain could oscillate. A fused-angle, rate-damped (P-D) loop would fly better and is the natural next step once the signs and basic behavior are confirmed.
+
+The gain (`kPitchKp`, `kRollKp`) is a conservative first guess. The feedback signs (`kPitchSign`, `kRollSign`) are bench-verified on the airframe: surfaces oppose a pitch or roll disturbance.
 
 ### Yaw induces roll
 
@@ -51,9 +65,7 @@ In this 3CH scheme there are no ailerons, so rudder (yaw) input is what induces 
 
 ## Known limitations
 
-- Not flight-ready: no attitude-driven control loop, no gyro bias calibration, altitude uses a fixed sea-level constant.
-- No iBus staleness failsafe: if the receiver link drops, the last channel values (including throttle) are held.
-- The loop does not measure its real period, so the filter's `dt` is nominal.
+- Not flight-ready: the leveler is untuned, there is no gyro bias calibration, altitude uses a fixed sea-level constant.
 
 ## Layout
 

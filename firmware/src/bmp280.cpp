@@ -18,7 +18,7 @@ constexpr uint8_t kChipIdExpect = 0x58;  // BMP280 (0x60 would be BME280)
 // osrs_t=1, osrs_p=1, mode=forced -- one conversion then back to sleep.
 constexpr uint8_t kCtrlMeasForced = (1u << 5) | (1u << 2) | 0x1;
 constexpr uint8_t kStatusMeasuring = 1u << 3;
-constexpr int kStatusPollLimit = 50;  // ~0.9 ms/poll -> up to ~45 ms, well over the ~6.4 ms datasheet max
+constexpr int kStatusPollLimit = 10;  // one poll per loop tick (5 ms) -> ~50 ms, well over the ~6.4 ms datasheet max
 
 constexpr float kSeaLevelPa = 101325.0f;
 
@@ -89,30 +89,58 @@ bool init() {
     return read_calibration();
 }
 
-Reading read() {
-    Reading r{0.0f, 0.0f, 0.0f};
+bool step(bool start, Reading& out) {
+    // One short I2C transaction (<= ~0.5 ms) per call, so the main loop never
+    // blocks for the conversion time. Any I2C failure abandons the cycle.
+    enum State : uint8_t { IDLE, MEASURING, READING };
+    static State state = IDLE;
+    static uint8_t idx = 0;
+    static int tries = 0;
+    static uint8_t raw[6];
 
-    if (!i2c1::write_reg(kAddr, kRegCtrlMeas, kCtrlMeasForced)) return r;
+    switch (state) {
+    case IDLE:
+        if (!start) return false;
+        if (!i2c1::write_reg(kAddr, kRegCtrlMeas, kCtrlMeasForced)) return false;
+        tries = 0;
+        state = MEASURING;
+        return false;
 
-    uint8_t status = kStatusMeasuring;
-    for (int i = 0; i < kStatusPollLimit && (status & kStatusMeasuring); ++i) {
-        if (!read_u8(kRegStatus, status)) return r;
+    case MEASURING: {
+        // Conversion takes ~6 ms max at these oversampling settings; by the
+        // next 5 ms tick it is usually done, so this is typically 1-2 polls.
+        uint8_t status = 0;
+        if (!read_u8(kRegStatus, status) || ++tries > kStatusPollLimit) {
+            state = IDLE;
+            return false;
+        }
+        if (!(status & kStatusMeasuring)) {
+            idx = 0;
+            state = READING;
+        }
+        return false;
     }
 
-    uint8_t raw[6];
-    for (int i = 0; i < 6; ++i) {
-        if (!read_u8(static_cast<uint8_t>(kRegPressMsb + i), raw[i])) return r;
+    case READING:
+        if (!read_u8(static_cast<uint8_t>(kRegPressMsb + idx), raw[idx])) {
+            state = IDLE;
+            return false;
+        }
+        if (++idx < 6) return false;
+        state = IDLE;
+        break;
     }
+
     int32_t adc_P = (static_cast<int32_t>(raw[0]) << 12) | (static_cast<int32_t>(raw[1]) << 4) | (raw[2] >> 4);
     int32_t adc_T = (static_cast<int32_t>(raw[3]) << 12) | (static_cast<int32_t>(raw[4]) << 4) | (raw[5] >> 4);
 
     int32_t temp_centi_c = compensate_temperature(adc_T);
     uint32_t press_q24_8 = compensate_pressure(adc_P);
 
-    r.temperature_c = static_cast<float>(temp_centi_c) / 100.0f;
-    r.pressure_pa = static_cast<float>(press_q24_8) / 256.0f;
-    r.altitude_m = 44330.0f * (1.0f - std::pow(r.pressure_pa / kSeaLevelPa, 0.1903f));
-    return r;
+    out.temperature_c = static_cast<float>(temp_centi_c) / 100.0f;
+    out.pressure_pa = static_cast<float>(press_q24_8) / 256.0f;
+    out.altitude_m = 44330.0f * (1.0f - std::pow(out.pressure_pa / kSeaLevelPa, 0.1903f));
+    return true;
 }
 
 }  // namespace bmp280
