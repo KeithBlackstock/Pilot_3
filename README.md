@@ -39,20 +39,24 @@ Failsafe behavior:
 
 ### Attitude loop (CH6 stabilize mode)
 
-CH6 (Mode) > 1500 enables an accelerometer-only wing-leveler (`firmware/src/attitude_level.hpp`):
+CH6 > 1500 enables a stateless P-D angle loop (`firmware/src/attitude_level.hpp`). The elevator (CH1) and rudder (CH2) sticks become pitch and roll angle requests, up to `max_pitch_deg` / `max_roll_deg` at full stick, and the output replaces the stick offset ahead of the ruddervator mix. Below 1500 the sticks pass straight through; on a stale RX both axes request level.
 
-- **Input:** the raw accel-derived pitch and roll angles. No gyro rate, no fused filter output, no integrator.
-- **Control law:** proportional only. Each axis outputs `-sign * Kp * angle` (4 us per degree), limited to +-250 us. Pitch acts through the elevator channel and roll through the rudder channel, since in this 3CH scheme yaw induces roll.
-- **Pilot override:** if either stick (CH1 or CH2) is outside a +-30 us deadband, the loop lets go of both axes and the pilot's commands pass straight through to the ruddervator mix. With both sticks centered, it drives both axes toward level.
-- **Off / failsafe:** below 1500, or with CH6 missing or invalid, the sticks always pass straight through. If the RX goes stale while the mode is on, both axes level (the motor is cut separately).
-
-The design prioritizes testability over ideal function. Being stateless, proportional-only and driven by one raw sensor, it is trivial to reason about and to verify on the bench: tilt the airframe and watch the surfaces oppose it. The cost is real. Raw accel angles are corrupted by sustained acceleration (turns, climbs) and vibration, and with no rate damping a higher gain could oscillate. A fused-angle, rate-damped (P-D) loop would fly better and is the natural next step once the signs and basic behavior are confirmed.
-
-The gain (`kPitchKp`, `kRollKp`) is a conservative first guess. The feedback signs (`kPitchSign`, `kRollSign`) are bench-verified on the airframe: surfaces oppose a pitch or roll disturbance.
+- **Control law:** `-sign * (Kp * (angle - request) + Kd * gyro_rate)`, limited to +-`max_output_us`. P uses the raw accel angle, D uses the gyro rate and simply opposes angular velocity.
+- **Tuning:** gains, directions, angle limits, deadband and authority are live-editable in the dashboard (below). Defaults in `kDefaults`: Kp 4 us/deg, Kd 0, 30 degrees, +-30 us deadband, +-250 us authority.
+- **Limits, by design:** simplicity is chosen over ideal function so it is easy to test on the bench. The accel angle is corrupted by sustained acceleration and vibration, and there is no gyro bias calibration.
 
 ### Yaw induces roll
 
 In this 3CH scheme there are no ailerons, so rudder (yaw) input is what induces roll. For control-input purposes, treat the CH2 "rudder" stick as the roll control: yaw and roll are coupled, and any future stabilization or mixing should regard it that way.
+
+## Dashboard and configurator
+
+`pilot3_dashboard.bat` starts OpenOCD and a browser dashboard (`tools/`) with live telemetry plus:
+
+- **Attitude leveler card:** shows whether the angle loop is on, and edits the gains (Kp, Kd), directions, max pitch/roll angles, deadband and authority limit. "Apply live" writes the values into the running FC's RAM over SWD (range-checked in the dashboard and again in the firmware; lost on reset). "Save as firmware defaults" rewrites `kDefaults` in `attitude_level.hpp` so the next build boots with them.
+- **Compile & Flash:** runs `firmware/build.bat`, flashes the ELF through the running OpenOCD (verify + reset), then re-applies any live values and reads the config back. Telemetry pauses while it runs. It resets the board, so remove the prop first; the button asks for confirmation.
+
+The dashboard's WebSocket only accepts connections from the dashboard page itself (Origin check), since it can flash the board.
 
 ## Verified on the bench
 

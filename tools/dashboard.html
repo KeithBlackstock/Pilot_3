@@ -39,6 +39,24 @@
   .ch .bar i { display: block; height: 100%; width: 0; background: var(--accent);
                border-radius: 5px; transition: width .08s linear; }
   .ch .num { font: 12px Consolas, monospace; text-align: right; }
+  .cfg { display: grid; grid-template-columns: 1fr 96px; gap: 6px 10px; align-items: center; margin-bottom: 10px; }
+  .cfg label { color: var(--dim); font-size: 12px; }
+  .cfg input, .cfg select { width: 100%; background: #0c0f13; color: var(--fg); border: 1px solid var(--edge);
+                            border-radius: 4px; padding: 4px 6px; font: 13px Consolas, monospace; }
+  .cfg input.dirty, .cfg select.dirty { border-color: var(--warn); }
+  button { background: #243040; color: var(--fg); border: 1px solid var(--edge); border-radius: 5px;
+           padding: 6px 12px; font: 13px "Segoe UI", sans-serif; cursor: pointer; margin: 0 6px 6px 0; }
+  button:hover:enabled { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: #1f4e6b; }
+  button.danger { background: #6b2f2f; }
+  .note { font-size: 12px; color: var(--dim); min-height: 1.4em; }
+  .note.err { color: var(--bad); }
+  .modebadge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; background: #2a323d; }
+  .modebadge.on { background: #1d4d2b; color: var(--ok); }
+  .modebadge.override { background: #5a4519; color: var(--warn); }
+  pre#joblog { background: #0c0f13; border: 1px solid var(--edge); border-radius: 5px; padding: 8px;
+               max-height: 180px; overflow: auto; font: 11px/1.35 Consolas, monospace; white-space: pre-wrap; margin: 8px 0 0; }
 </style>
 </head>
 <body>
@@ -92,6 +110,37 @@
       <div class="readout"><div class="val" id="pwm-s1">–</div><div class="lbl">PWM S1</div></div>
       <div class="readout"><div class="val" id="pwm-s4">–</div><div class="lbl">PWM S4</div></div>
     </div>
+  </section>
+
+  <section class="card">
+    <h2>Attitude leveler (CH6)</h2>
+    <div class="stats" style="margin-bottom:8px">Sticks request angles; P on accel angle, D on gyro rate.
+      State: <span class="modebadge" id="lvl-state">–</span></div>
+    <div class="cfg" id="cfg">
+      <label for="cfg-pitch_kp">Pitch Kp (µs/°)</label><input id="cfg-pitch_kp" type="number" step="0.1" min="0" max="20">
+      <label for="cfg-roll_kp">Roll Kp (µs/°)</label><input id="cfg-roll_kp" type="number" step="0.1" min="0" max="20">
+      <label for="cfg-pitch_kd">Pitch Kd (µs per °/s)</label><input id="cfg-pitch_kd" type="number" step="0.05" min="0" max="5">
+      <label for="cfg-roll_kd">Roll Kd (µs per °/s)</label><input id="cfg-roll_kd" type="number" step="0.05" min="0" max="5">
+      <label for="cfg-pitch_sign">Pitch direction</label>
+      <select id="cfg-pitch_sign"><option value="1">normal</option><option value="-1">inverted</option></select>
+      <label for="cfg-roll_sign">Roll direction</label>
+      <select id="cfg-roll_sign"><option value="1">normal</option><option value="-1">inverted</option></select>
+      <label for="cfg-max_pitch_deg">Max pitch (±°, full stick)</label><input id="cfg-max_pitch_deg" type="number" step="1" min="0" max="60">
+      <label for="cfg-max_roll_deg">Max roll (±°, full stick)</label><input id="cfg-max_roll_deg" type="number" step="1" min="0" max="60">
+      <label for="cfg-deadband_us">Stick center deadband (±µs)</label><input id="cfg-deadband_us" type="number" step="5" min="0" max="200">
+      <label for="cfg-max_output_us">Max authority (±µs)</label><input id="cfg-max_output_us" type="number" step="10" min="0" max="500">
+    </div>
+    <button class="primary" id="btn-apply">Apply live</button>
+    <button id="btn-reload">Reload from FC</button>
+    <button id="btn-save">Save as firmware defaults</button>
+    <div class="note" id="cfg-note">Live values are lost on reset unless saved as defaults and flashed.</div>
+  </section>
+
+  <section class="card">
+    <h2>Firmware</h2>
+    <button class="danger" id="btn-flash">Compile &amp; Flash</button>
+    <div class="note" id="job-note">Builds firmware/ and flashes the connected FC over SWD.</div>
+    <pre id="joblog" hidden></pre>
   </section>
 </div>
 
@@ -155,7 +204,81 @@ function setStatus(cls, text) {
   statusText.textContent = text;
 }
 
+// ---- leveler config + firmware job ----
+const CFG_FIELDS = ["pitch_kp", "roll_kp", "pitch_kd", "roll_kd", "pitch_sign", "roll_sign", "max_pitch_deg", "max_roll_deg", "deadband_us", "max_output_us"];
+let ws = null;
+let cfgLoaded = {};   // last values known to be on the FC
+
+const cfgEl = (n) => document.getElementById("cfg-" + n);
+function cfgNote(text, err) {
+  const el = document.getElementById("cfg-note");
+  el.textContent = text; el.className = "note" + (err ? " err" : "");
+}
+function sendCmd(obj) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
+  else cfgNote("Not connected to the dashboard server.", true);
+}
+function cfgValues() {
+  const v = {};
+  CFG_FIELDS.forEach(n => { v[n] = parseFloat(cfgEl(n).value); });
+  return v;
+}
+function markDirty() {
+  CFG_FIELDS.forEach(n => {
+    const el = cfgEl(n);
+    el.classList.toggle("dirty", cfgLoaded[n] !== undefined && parseFloat(el.value) !== cfgLoaded[n]);
+  });
+}
+CFG_FIELDS.forEach(n => { cfgEl(n).addEventListener("input", markDirty); cfgEl(n).addEventListener("change", markDirty); });
+
+function applyConfig(m) {
+  cfgLoaded = m.values;
+  CFG_FIELDS.forEach(n => {
+    const el = cfgEl(n);
+    el.value = el.tagName === "SELECT" ? String(m.values[n] < 0 ? -1 : 1) : m.values[n];
+  });
+  markDirty();
+  cfgNote(m.note || "", false);
+}
+function validValues() {
+  const v = cfgValues();
+  if (Object.values(v).some(x => Number.isNaN(x))) { cfgNote("Enter a number in every field.", true); return null; }
+  return v;
+}
+
+document.getElementById("btn-apply").onclick = () => { const v = validValues(); if (v) sendCmd({ cmd: "set_config", values: v }); };
+document.getElementById("btn-reload").onclick = () => sendCmd({ cmd: "get_config" });
+document.getElementById("btn-save").onclick = () => { const v = validValues(); if (v) sendCmd({ cmd: "save_defaults", values: v }); };
+document.getElementById("btn-flash").onclick = () => {
+  if (!confirm("Compile and flash the FC?\n\nThis resets the board. Remove the propeller and make sure the ESC is not live.")) return;
+  sendCmd({ cmd: "build_flash" });
+};
+
+function updateJob(m) {
+  const note = document.getElementById("job-note"), log = document.getElementById("joblog"),
+        btn = document.getElementById("btn-flash");
+  const busy = m.state === "building" || m.state === "flashing";
+  btn.disabled = busy;
+  note.className = "note" + (m.state === "error" ? " err" : "");
+  note.textContent = { building: "Compiling…", flashing: "Flashing — telemetry paused…",
+                       done: "Done.", error: "Failed." }[m.state] || "";
+  log.hidden = !m.log;
+  log.textContent = m.log || "";
+  log.scrollTop = log.scrollHeight;
+  ["btn-apply", "btn-reload", "btn-save"].forEach(id => { document.getElementById(id).disabled = busy; });
+}
+
+function updateLevelerState(ch) {
+  const el = document.getElementById("lvl-state");
+  const on = ch[5] > 1500 && ch[5] <= 2100;
+  el.className = "modebadge" + (on ? " on" : "");
+  el.textContent = on ? "angle mode (CH6 > 1500)" : "off — sticks direct";
+}
+
 function update(m) {
+  if (m.type === "config") { applyConfig(m); return; }
+  if (m.type === "config_error") { cfgNote(m.error, true); return; }
+  if (m.type === "job") { updateJob(m); return; }
   if (!m.connected) {
     setStatus("", m.error || "waiting for device…");
     return;
@@ -193,17 +316,19 @@ function update(m) {
     chRows[i].bar.style.width = (pct * 100).toFixed(1) + "%";
     chRows[i].num.textContent = v;
   });
+  updateLevelerState(m.ibus_ch);
   document.getElementById("pwm-s1").innerHTML = fmt(m.pwm_s1_us, 0, "µs");
   document.getElementById("pwm-s4").innerHTML = fmt(m.pwm_s4_us, 0, "µs");
 }
 
 // Connect, and reconnect automatically whenever the socket drops.
 function connect() {
-  const ws = new WebSocket(WS_URL);
-  ws.onopen = () => setStatus("", "connected, waiting for data…");
-  ws.onmessage = (e) => update(JSON.parse(e.data));
-  ws.onclose = () => { setStatus("", "server disconnected — retrying…"); setTimeout(connect, 1000); };
-  ws.onerror = () => ws.close();
+  const sock = new WebSocket(WS_URL);
+  ws = sock;
+  sock.onopen = () => { setStatus("", "connected, waiting for data…"); sendCmd({ cmd: "get_config" }); };
+  sock.onmessage = (e) => update(JSON.parse(e.data));
+  sock.onclose = () => { setStatus("", "server disconnected — retrying…"); setTimeout(connect, 1000); };
+  sock.onerror = () => sock.close();
 }
 connect();
 </script>

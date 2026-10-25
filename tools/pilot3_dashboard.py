@@ -26,6 +26,7 @@ from pathlib import Path
 from websockets.exceptions import ConnectionClosed
 from websockets.sync.server import serve
 
+import pilot3_fc_control as fc
 from pilot3_attitude_monitor import NUM_CHANNELS, read_telemetry
 from pilot3_swd_probe import Ocd
 
@@ -40,6 +41,7 @@ class Hub:
         self._lock = threading.Lock()
         self._clients = set()
         self.latest = None  # last JSON string, replayed to new clients
+        self.sticky = {}    # last message of each non-telemetry type, also replayed
 
     def publish(self, msg):
         data = json.dumps(msg)
@@ -52,22 +54,47 @@ class Hub:
             except ConnectionClosed:
                 self.remove(conn)
 
+    def broadcast(self, msg, sticky=True):
+        """Non-telemetry message (config / job status); replayed to new
+        clients but never overwrites the telemetry snapshot."""
+        data = json.dumps(msg)
+        with self._lock:
+            if sticky:
+                self.sticky[msg["type"]] = data
+            clients = list(self._clients)
+        for conn in clients:
+            try:
+                conn.send(data)
+            except ConnectionClosed:
+                self.remove(conn)
+
     def add(self, conn):
         with self._lock:
             self._clients.add(conn)
-            return self.latest
+            first = [self.latest] if self.latest else []
+            return first + list(self.sticky.values())
 
     def remove(self, conn):
         with self._lock:
             self._clients.discard(conn)
 
 
-def poll_loop(hub, host, port, hz):
+def poll_loop(hub, host, port, hz, ctl):
     """Forever: read the Telemetry struct and broadcast it. Reconnects to
     OpenOCD on failure so the page just shows 'disconnected' meanwhile."""
     ocd = None
     last_seq = None
     while True:
+        if ctl.busy.is_set():
+            # Build/flash in progress: the target is being reset, don't poll.
+            if ocd is not None:
+                try:
+                    ocd.close()
+                except OSError:
+                    pass
+                ocd = None
+            time.sleep(0.2)
+            continue
         if ocd is None:
             try:
                 ocd = Ocd(host, port)
@@ -115,19 +142,111 @@ def poll_loop(hub, host, port, hz):
         time.sleep(1.0 / hz)
 
 
-def ws_handler(hub, conn):
-    """One browser client. We never expect inbound messages; the recv loop
-    just holds the socket open until the browser goes away."""
-    latest = hub.add(conn)
-    if latest is not None:
+class Controller:
+    """Handles browser commands: leveler config and compile + flash. One
+    background job at a time; telemetry polling pauses while it runs."""
+
+    def __init__(self, hub, host, port):
+        self.hub = hub
+        self.link = fc.OcdLink(host, port)
+        self.busy = threading.Event()
+        self._job_lock = threading.Lock()
+        self.live = None  # last values applied from the dashboard this session
+
+    def _job(self, state, log=""):
+        self.hub.broadcast({"type": "job", "state": state, "log": log})
+
+    def _config(self, values, note=""):
+        self.hub.broadcast({"type": "config", "values": values, "note": note})
+
+    def handle(self, msg):
+        cmd = msg.get("cmd")
         try:
-            conn.send(latest)
-        except ConnectionClosed:
-            hub.remove(conn)
+            if cmd == "get_config":
+                self._config(self.link.read_config(), "read from FC")
+            elif cmd == "set_config":
+                values = self.link.write_config(msg.get("values", {}))
+                self.live = values
+                self._config(values, "applied live (lost on reset unless saved)")
+            elif cmd == "save_defaults":
+                fc.save_defaults(msg.get("values", {}))
+                self._config(fc.validate(msg["values"]),
+                             "saved to attitude_level.hpp -- takes effect after Compile & Flash")
+            elif cmd == "build_flash":
+                self._start_job()
+            else:
+                return
+        except fc.ControlError as e:
+            self.hub.broadcast({"type": "config_error", "error": str(e)}, sticky=False)
+        except (OSError, RuntimeError) as e:
+            self.hub.broadcast({"type": "config_error", "error": f"OpenOCD: {e}"}, sticky=False)
+
+    def _start_job(self):
+        if not self._job_lock.acquire(blocking=False):
             return
+        self.busy.set()
+        threading.Thread(target=self._build_flash, daemon=True).start()
+
+    def _build_flash(self):
+        try:
+            self._job("building")
+            ok, log = fc.build()
+            if not ok:
+                self._job("error", "BUILD FAILED\n" + log[-3000:])
+                return
+            self._job("flashing", log[-600:])
+            try:
+                self.link.flash()
+            except (fc.ControlError, OSError) as e:
+                self._job("error", f"FLASH FAILED: {e}")
+                return
+            time.sleep(1.0)  # let the firmware boot before touching its RAM
+            note = ""
+            try:
+                if self.live is not None:
+                    # Flash restored the compiled-in defaults; put back whatever
+                    # the dashboard had applied so a re-flash doesn't silently
+                    # revert tuning in progress.
+                    self.link.write_config(self.live)
+                    note = " Live-applied values were re-applied."
+                self._config(self.link.read_config(), "read from FC after flash")
+            except (fc.ControlError, OSError) as e:
+                note = f" (could not read config back: {e})"
+            self._job("done", "Build OK, flashed and verified." + note)
+        finally:
+            self.busy.clear()
+            self._job_lock.release()
+
+
+def origin_allowed(conn, http_port):
+    """Reject WebSocket connections from foreign web pages: any site open in
+    the browser could otherwise reach ws://127.0.0.1 and trigger flashes."""
+    origin = conn.request.headers.get("Origin")
+    if origin is None:  # non-browser local client
+        return True
+    return origin in {f"http://127.0.0.1:{http_port}", f"http://localhost:{http_port}"}
+
+
+def ws_handler(hub, ctl, http_port, conn):
+    """One browser client: replay current state, then handle its commands."""
+    if not origin_allowed(conn, http_port):
+        conn.close(1008, "bad origin")
+        return
     try:
-        for _ in conn:
-            pass
+        for data in hub.add(conn):
+            conn.send(data)
+    except ConnectionClosed:
+        hub.remove(conn)
+        return
+    try:
+        for raw in conn:
+            try:
+                msg = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(msg, dict):
+                # Off the socket thread: commands can take seconds (flash).
+                threading.Thread(target=ctl.handle, args=(msg,), daemon=True).start()
     except ConnectionClosed:
         pass
     finally:
@@ -161,10 +280,11 @@ def main():
     args = ap.parse_args()
 
     hub = Hub()
+    ctl = Controller(hub, args.host, args.port)
 
-    threading.Thread(target=poll_loop, args=(hub, args.host, args.port, args.rate), daemon=True).start()
+    threading.Thread(target=poll_loop, args=(hub, args.host, args.port, args.rate, ctl), daemon=True).start()
 
-    ws_server = serve(lambda conn: ws_handler(hub, conn), "127.0.0.1", args.ws_port)
+    ws_server = serve(lambda conn: ws_handler(hub, ctl, args.http_port, conn), "127.0.0.1", args.ws_port)
     threading.Thread(target=ws_server.serve_forever, daemon=True).start()
 
     url = f"http://127.0.0.1:{args.http_port}/"

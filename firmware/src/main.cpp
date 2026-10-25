@@ -22,6 +22,14 @@ using namespace reg;
 
 volatile Telemetry g_telemetry __attribute__((section(".telemetry"))) = {};
 
+// Live-tunable leveler config; the dashboard finds it by symbol name.
+volatile attitude_level::Config g_attitude_config = {
+    attitude_level::kDefaults.pitch_kp,    attitude_level::kDefaults.roll_kp,
+    attitude_level::kDefaults.pitch_kd,    attitude_level::kDefaults.roll_kd,
+    attitude_level::kDefaults.pitch_sign,  attitude_level::kDefaults.roll_sign,
+    attitude_level::kDefaults.max_pitch_deg, attitude_level::kDefaults.max_roll_deg,
+    attitude_level::kDefaults.deadband_us, attitude_level::kDefaults.max_output_us};
+
 namespace {
 
 constexpr uint32_t kSysClockHz = 8'000'000;
@@ -172,16 +180,18 @@ int main() {
         int16_t elev = stick_offset_us(ch[0]);
         int16_t rud  = stick_offset_us(ch[1]);
 
-        // CH6 (Mode) > 1500 enables the accelerometer-only leveler. If either
-        // stick is outside its deadband the loop lets go of BOTH axes and
-        // passes the pilot's commands through; with both sticks centered (or
-        // the RX stale) it drives pitch and roll level. Invalid CH6
-        // (0 / out of range) leaves it off.
+        // CH6 (Mode) > 1500 enables the angle loop (P on accel angle, D on
+        // gyro rate): the elevator/rudder sticks become pitch/roll angle
+        // requests (see attitude_level.hpp) and replace the direct
+        // stick-to-surface path. A stale RX requests level. Invalid CH6 (0 / out of range) leaves
+        // the sticks passing straight through.
         bool stabilize = ch[5] > 1500 && ch[5] <= 2100;
-        if (stabilize && (rx_stale || (attitude_level::hands_off(elev) &&
-                                       attitude_level::hands_off(rud)))) {
-            elev = static_cast<int16_t>(attitude_level::pitch(filter.accel_pitch_deg()));
-            rud  = static_cast<int16_t>(attitude_level::roll(filter.accel_roll_deg()));
+        if (stabilize) {
+            attitude_level::Config lvl = attitude_level::snapshot();
+            float elev_req = rx_stale ? 0.0f : static_cast<float>(elev);
+            float rud_req  = rx_stale ? 0.0f : static_cast<float>(rud);
+            elev = static_cast<int16_t>(attitude_level::pitch(lvl, elev_req, filter.accel_pitch_deg(), s.gyro_dps[1]));
+            rud  = static_cast<int16_t>(attitude_level::roll(lvl, rud_req, filter.accel_roll_deg(), s.gyro_dps[0]));
         }
         g_telemetry.pwm_s1_us = servo_pwm::set_s1_us(mix_us(-elev + rud));
         g_telemetry.pwm_s4_us = servo_pwm::set_s4_us(mix_us(-elev - rud));
