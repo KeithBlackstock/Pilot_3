@@ -1,6 +1,7 @@
 // Angle-command loop for pitch and roll: P on the angle error plus D on the
 // gyro rate. Stateless (no integrator, no filter state). The P term uses the
-// raw accel-derived angle; the D term uses the gyro rate directly and simply
+// complementary-filter angle (gyro-led short term, so brief linear accelerations
+// from launch/throttle/vibration are mostly rejected); the D term uses the gyro rate directly and simply
 // opposes angular velocity (it wants 0 deg/s), so there are no rate limits
 // and no cascade -- the two terms just act together on the surface offset.
 //
@@ -8,7 +9,7 @@
 // +-max_pitch_deg, full CH2 for +-max_roll_deg, centered sticks ask for level.
 // The loop outputs a surface offset that drives the measured angle toward the
 // requested one. (Outside stabilize mode the sticks bypass this entirely.)
-// Kd defaults to 0 (pure P) until tuned up from the dashboard.
+// Kd defaults to a small value (0.1 us per deg/s); tune it from the dashboard.
 //
 // Pitch acts through elevator, roll through rudder (3CH: yaw induces roll).
 //
@@ -45,7 +46,7 @@ struct Config {
     float s4_sign;        // servo S4 output direction
 };
 
-constexpr Config kDefaults = {4.0f, 4.0f, 0.0f, 0.0f, -1.0f, 1.0f, 30.0f, 30.0f, 30.0f, 250.0f, 1.0f, 1.0f};  // DEFAULTS-LINE
+constexpr Config kDefaults = {4.0f, 4.0f, 0.1f, 0.1f, -1.0f, 1.0f, 30.0f, 30.0f, 30.0f, 250.0f, 1.0f, 1.0f};  // DEFAULTS-LINE
 
 constexpr float kMaxKp = 20.0f;
 constexpr float kMaxKd = 5.0f;
@@ -103,12 +104,12 @@ inline float track(const Config& c, float stick_offset_us, float angle_deg, floa
     return out;
 }
 
-inline float pitch(const Config& c, float stick_offset_us, float accel_pitch_deg, float pitch_rate_dps) {
-    return track(c, stick_offset_us, accel_pitch_deg, pitch_rate_dps,
+inline float pitch(const Config& c, float stick_offset_us, float pitch_deg, float pitch_rate_dps) {
+    return track(c, stick_offset_us, pitch_deg, pitch_rate_dps,
                  c.max_pitch_deg, c.pitch_sign, c.pitch_kp, c.pitch_kd);
 }
-inline float roll(const Config& c, float stick_offset_us, float accel_roll_deg, float roll_rate_dps) {
-    return track(c, stick_offset_us, accel_roll_deg, roll_rate_dps,
+inline float roll(const Config& c, float stick_offset_us, float roll_deg, float roll_rate_dps) {
+    return track(c, stick_offset_us, roll_deg, roll_rate_dps,
                  c.max_roll_deg, c.roll_sign, c.roll_kp, c.roll_kd);
 }
 

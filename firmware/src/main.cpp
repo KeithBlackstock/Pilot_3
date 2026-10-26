@@ -202,8 +202,8 @@ int main() {
             // slot (`elev`, ch1) -- see the mix comment above.
             float pitch_req = rx_stale ? 0.0f : static_cast<float>(rud);
             float roll_req  = rx_stale ? 0.0f : static_cast<float>(elev);
-            rud  = static_cast<int16_t>(attitude_level::pitch(lvl, pitch_req, filter.accel_pitch_deg(), s.gyro_dps[1]));
-            elev = static_cast<int16_t>(attitude_level::roll(lvl, roll_req, filter.accel_roll_deg(), s.gyro_dps[0]));
+            rud  = static_cast<int16_t>(attitude_level::pitch(lvl, pitch_req, filter.pitch_deg(), s.gyro_dps[1]));
+            elev = static_cast<int16_t>(attitude_level::roll(lvl, roll_req, filter.roll_deg(), s.gyro_dps[0]));
         }
         // Per-servo reverse (mirrored mounting), applied to the final mix so it
         // holds in both direct and stabilize mode.
