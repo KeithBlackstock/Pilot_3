@@ -18,8 +18,19 @@ public:
         accel_roll_deg_  = accel_roll_deg;
         accel_pitch_deg_ = accel_pitch_deg;
 
-        roll_deg_  = kAlpha * (roll_deg_ + gx_dps * dt_s) + (1.0f - kAlpha) * accel_roll_deg;
-        pitch_deg_ = kAlpha * (pitch_deg_ + gy_dps * dt_s) + (1.0f - kAlpha) * accel_pitch_deg;
+        // Dynamic accel weight: the accelerometer only measures gravity alone
+        // when |a| is ~1 g. The further |a| is from 1 g (launch, throttle punch,
+        // impact, vibration, banked turn), the less the accel angle is trusted,
+        // down to gyro-only at kAccelBandG. Note |a| barely moves for a modest
+        // acceleration at right angles to gravity (0.3 g -> 1.04 g), so this
+        // rejects big events, not small sustained ones.
+        float mag_g = std::sqrt(ax_g * ax_g + ay_g * ay_g + az_g * az_g);
+        float w = 1.0f - std::fabs(mag_g - 1.0f) / kAccelBandG;
+        if (!(w > 0.0f)) w = 0.0f;  // also catches NaN
+        float k = (1.0f - kAlpha) * w;
+
+        roll_deg_  = (1.0f - k) * (roll_deg_ + gx_dps * dt_s) + k * accel_roll_deg;
+        pitch_deg_ = (1.0f - k) * (pitch_deg_ + gy_dps * dt_s) + k * accel_pitch_deg;
     }
 
     float roll_deg() const { return roll_deg_; }
@@ -30,7 +41,8 @@ public:
     float accel_pitch_deg() const { return accel_pitch_deg_; }
 
 private:
-    static constexpr float kAlpha = 0.98f;
+    static constexpr float kAlpha = 0.98f;       // gyro share when the accel is fully trusted
+    static constexpr float kAccelBandG = 0.25f;  // | |a| - 1 g | at which the accel weight reaches 0
     float roll_deg_  = 0.0f;
     float pitch_deg_ = 0.0f;
     float accel_roll_deg_  = 0.0f;
