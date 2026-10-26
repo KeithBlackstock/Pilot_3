@@ -29,7 +29,8 @@ volatile attitude_level::Config g_attitude_config = {
     attitude_level::kDefaults.pitch_sign,  attitude_level::kDefaults.roll_sign,
     attitude_level::kDefaults.max_pitch_deg, attitude_level::kDefaults.max_roll_deg,
     attitude_level::kDefaults.deadband_us, attitude_level::kDefaults.max_output_us,
-    attitude_level::kDefaults.s1_sign,     attitude_level::kDefaults.s4_sign};
+    attitude_level::kDefaults.s1_sign,     attitude_level::kDefaults.s4_sign,
+    attitude_level::kDefaults.trim_pitch_deg};
 
 namespace {
 

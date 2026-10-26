@@ -44,9 +44,10 @@ struct Config {
     float max_output_us;  // authority limit (gentle)
     float s1_sign;        // servo S1 output direction (<0 reverses about 1500 us)
     float s4_sign;        // servo S4 output direction
+    float trim_pitch_deg; // pitch angle held with centered sticks (+ = nose up)
 };
 
-constexpr Config kDefaults = {4.0f, 4.0f, 0.1f, 0.1f, -1.0f, 1.0f, 30.0f, 30.0f, 30.0f, 250.0f, 1.0f, 1.0f};  // DEFAULTS-LINE
+constexpr Config kDefaults = {4.0f, 4.0f, 0.1f, 0.1f, -1.0f, 1.0f, 30.0f, 30.0f, 30.0f, 250.0f, 1.0f, 1.0f, 5.0f};  // DEFAULTS-LINE
 
 constexpr float kMaxKp = 20.0f;
 constexpr float kMaxKd = 5.0f;
@@ -82,6 +83,7 @@ inline Config snapshot() {
     c.max_output_us = clamp_range(g_attitude_config.max_output_us, 0.0f, kMaxOutputLimitUs);
     c.s1_sign       = g_attitude_config.s1_sign < 0.0f ? -1.0f : 1.0f;
     c.s4_sign       = g_attitude_config.s4_sign < 0.0f ? -1.0f : 1.0f;
+    c.trim_pitch_deg = clamp_range(g_attitude_config.trim_pitch_deg, -kMaxAngleDeg, kMaxAngleDeg);
     return c;
 }
 
@@ -96,8 +98,9 @@ inline float stick_norm(const Config& c, float stick_offset_us) {
 }
 
 inline float track(const Config& c, float stick_offset_us, float angle_deg, float rate_dps,
-                   float max_angle_deg, float sign, float kp, float kd) {
-    float request_deg = sign * stick_norm(c, stick_offset_us) * max_angle_deg;
+                   float max_angle_deg, float sign, float kp, float kd, float trim_deg) {
+    // Trim is a real angle (not scaled by sign) added to the stick's request.
+    float request_deg = sign * stick_norm(c, stick_offset_us) * max_angle_deg + trim_deg;
     float out = -sign * (kp * (angle_deg - request_deg) + kd * rate_dps);
     if (out > c.max_output_us) return c.max_output_us;
     if (out < -c.max_output_us) return -c.max_output_us;
@@ -106,11 +109,11 @@ inline float track(const Config& c, float stick_offset_us, float angle_deg, floa
 
 inline float pitch(const Config& c, float stick_offset_us, float pitch_deg, float pitch_rate_dps) {
     return track(c, stick_offset_us, pitch_deg, pitch_rate_dps,
-                 c.max_pitch_deg, c.pitch_sign, c.pitch_kp, c.pitch_kd);
+                 c.max_pitch_deg, c.pitch_sign, c.pitch_kp, c.pitch_kd, c.trim_pitch_deg);
 }
 inline float roll(const Config& c, float stick_offset_us, float roll_deg, float roll_rate_dps) {
     return track(c, stick_offset_us, roll_deg, roll_rate_dps,
-                 c.max_roll_deg, c.roll_sign, c.roll_kp, c.roll_kd);
+                 c.max_roll_deg, c.roll_sign, c.roll_kp, c.roll_kd, 0.0f);
 }
 
 }  // namespace attitude_level

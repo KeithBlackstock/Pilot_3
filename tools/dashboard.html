@@ -127,6 +127,7 @@
       <select id="cfg-roll_sign"><option value="1">normal</option><option value="-1">inverted</option></select>
       <label for="cfg-max_pitch_deg">Max pitch (±°, full stick)</label><input id="cfg-max_pitch_deg" type="number" step="1" min="0" max="60">
       <label for="cfg-max_roll_deg">Max roll (±°, full stick)</label><input id="cfg-max_roll_deg" type="number" step="1" min="0" max="60">
+      <label for="cfg-trim_pitch_deg">Pitch trim (°, + = nose up)</label><input id="cfg-trim_pitch_deg" type="number" step="0.5" min="-60" max="60">
       <label for="cfg-deadband_us">Stick center deadband (±µs)</label><input id="cfg-deadband_us" type="number" step="5" min="0" max="200">
       <label for="cfg-max_output_us">Max authority (±µs)</label><input id="cfg-max_output_us" type="number" step="10" min="0" max="500">
       <label for="cfg-s1_sign">Servo S1 direction</label>
@@ -209,7 +210,7 @@ function setStatus(cls, text) {
 }
 
 // ---- leveler config + firmware job ----
-const CFG_FIELDS = ["pitch_kp", "roll_kp", "pitch_kd", "roll_kd", "pitch_sign", "roll_sign", "max_pitch_deg", "max_roll_deg", "deadband_us", "max_output_us", "s1_sign", "s4_sign"];
+const CFG_FIELDS = ["pitch_kp", "roll_kp", "pitch_kd", "roll_kd", "pitch_sign", "roll_sign", "max_pitch_deg", "max_roll_deg", "deadband_us", "max_output_us", "s1_sign", "s4_sign", "trim_pitch_deg"];
 let ws = null;
 let cfgLoaded = {};   // last values known to be on the FC
 
