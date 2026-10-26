@@ -28,7 +28,8 @@ volatile attitude_level::Config g_attitude_config = {
     attitude_level::kDefaults.pitch_kd,    attitude_level::kDefaults.roll_kd,
     attitude_level::kDefaults.pitch_sign,  attitude_level::kDefaults.roll_sign,
     attitude_level::kDefaults.max_pitch_deg, attitude_level::kDefaults.max_roll_deg,
-    attitude_level::kDefaults.deadband_us, attitude_level::kDefaults.max_output_us};
+    attitude_level::kDefaults.deadband_us, attitude_level::kDefaults.max_output_us,
+    attitude_level::kDefaults.s1_sign,     attitude_level::kDefaults.s4_sign};
 
 namespace {
 
@@ -143,6 +144,11 @@ int main() {
         float dt_s = static_cast<float>(elapsed) / static_cast<float>(kSysClockHz);
 
         icm::Sample s = icm::read();
+        // Bench-verified: the raw X-roll axis reads right-wing-down as negative.
+        // Negate it here (accel Y and gyro X) so roll is right-wing-down positive
+        // everywhere downstream: filter, telemetry, and the leveler's D term.
+        s.accel_g[1] = -s.accel_g[1];
+        s.gyro_dps[0] = -s.gyro_dps[0];
         filter.update(s.accel_g[0], s.accel_g[1], s.accel_g[2],
                       s.gyro_dps[0], s.gyro_dps[1], dt_s);
 
@@ -174,9 +180,13 @@ int main() {
         }
         bool rx_stale = loops_since_frame >= kIbusStaleLoops;
 
-        // Ruddervator (V-tail) mix: elevator = ch1, rudder = ch2 (ch3 = throttle). Signs are
-        // bench-verified on hardware; the servos are mounted mirrored, so
-        // the signs are not interchangeable between S1 and S4.
+        // Ruddervator (V-tail) mix (ch3 = throttle). The servos are mounted
+        // mirrored, so on the bench the *differential* term (S1 vs S4 opposite
+        // in us) is pitch and the *common* term is roll/yaw. The variables are
+        // named for their mix slot, not the surface: `elev` is the common term
+        // fed by ch1 (index 0), `rud` is the differential term fed by ch2
+        // (index 1), which is the pitch stick on this transmitter. Signs are
+        // bench-verified; they are not interchangeable between S1 and S4.
         int16_t elev = stick_offset_us(ch[0]);
         int16_t rud  = stick_offset_us(ch[1]);
 
@@ -188,13 +198,22 @@ int main() {
         bool stabilize = ch[5] > 1500 && ch[5] <= 2100;
         if (stabilize) {
             attitude_level::Config lvl = attitude_level::snapshot();
-            float elev_req = rx_stale ? 0.0f : static_cast<float>(elev);
-            float rud_req  = rx_stale ? 0.0f : static_cast<float>(rud);
-            elev = static_cast<int16_t>(attitude_level::pitch(lvl, elev_req, filter.accel_pitch_deg(), s.gyro_dps[1]));
-            rud  = static_cast<int16_t>(attitude_level::roll(lvl, rud_req, filter.accel_roll_deg(), s.gyro_dps[0]));
+            // Pitch is the differential slot (`rud`, ch2); roll is the common
+            // slot (`elev`, ch1) -- see the mix comment above.
+            float pitch_req = rx_stale ? 0.0f : static_cast<float>(rud);
+            float roll_req  = rx_stale ? 0.0f : static_cast<float>(elev);
+            rud  = static_cast<int16_t>(attitude_level::pitch(lvl, pitch_req, filter.accel_pitch_deg(), s.gyro_dps[1]));
+            elev = static_cast<int16_t>(attitude_level::roll(lvl, roll_req, filter.accel_roll_deg(), s.gyro_dps[0]));
         }
-        g_telemetry.pwm_s1_us = servo_pwm::set_s1_us(mix_us(-elev + rud));
-        g_telemetry.pwm_s4_us = servo_pwm::set_s4_us(mix_us(-elev - rud));
+        // Per-servo reverse (mirrored mounting), applied to the final mix so it
+        // holds in both direct and stabilize mode.
+        attitude_level::Config dir = attitude_level::snapshot();
+        int16_t s1_off = static_cast<int16_t>(-elev + rud);
+        int16_t s4_off = static_cast<int16_t>(-elev - rud);
+        if (dir.s1_sign < 0.0f) s1_off = -s1_off;
+        if (dir.s4_sign < 0.0f) s4_off = -s4_off;
+        g_telemetry.pwm_s1_us = servo_pwm::set_s1_us(mix_us(s1_off));
+        g_telemetry.pwm_s4_us = servo_pwm::set_s4_us(mix_us(s4_off));
         // Throttle = iBus channel 3 (index 2) -> ESC on PWM_S2. Cut to off
         // if the RX has gone quiet; servos keep their last position.
         servo_pwm::set_s2_motor_us(rx_stale ? 0 : ch[2]);

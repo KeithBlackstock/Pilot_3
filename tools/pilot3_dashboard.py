@@ -10,13 +10,17 @@ snapshots to the page over a WebSocket:
     HTTP  http://127.0.0.1:8080/   -> dashboard.html
     WS    ws://127.0.0.1:8081/     -> telemetry JSON, ~--rate times/second
 
-Requires the firmware already flashed and running, and OpenOCD already
-attached (pilot3_fw_build_flash.bat does both). If either is missing the
-page still loads and shows a "waiting for device" state until polling
-succeeds.
+Requires the firmware already flashed and running. OpenOCD is adopted if an
+instance is already answering on the telnet port (pilot3_dashboard.bat starts
+one); otherwise the dashboard spawns its own. If the telnet link stays dead
+for RESTART_AFTER_S, the wedged OpenOCD session is killed and respawned
+automatically (--no-ocd-restart disables that). On exit, the dashboard kills
+only an instance it spawned -- someone else's OpenOCD is left alone.
 """
 import argparse
 import json
+import socket
+import subprocess
 import threading
 import time
 import webbrowser
@@ -31,6 +35,84 @@ from pilot3_attitude_monitor import NUM_CHANNELS, read_telemetry
 from pilot3_swd_probe import Ocd
 
 PAGE_PATH = Path(__file__).resolve().parent / "dashboard.html"
+
+# OpenOCD supervision (see module docstring). Same binary and args as
+# pilot3_dashboard.bat.
+OPENOCD_EXE = Path(r"C:\Users\goats\AppData\Local\Microsoft\WinGet\Packages\xpack-dev-tools.openocd-xpack_Microsoft.Winget.Source_8wekyb3d8bbwe\xpack-openocd-0.12.0-7\bin\openocd.exe")
+OPENOCD_ARGS = ["-f", "interface/stlink.cfg", "-f", "target/stm32f3x.cfg", "-c", "adapter speed 950"]
+RESTART_AFTER_S = 8.0  # link dead this long -> kill & respawn OpenOCD
+
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+class OcdServer:
+    """Owns the OpenOCD process behind the telnet link.
+
+    Adopts a running instance if the port answers; otherwise spawns its own
+    child. restart() kills whatever is there (a dead port means a wedged
+    process) and spawns a fresh owned instance. shutdown() kills only an
+    instance we spawned, matching the .bat's rule of leaving someone else's
+    OpenOCD alone."""
+
+    def __init__(self, host, port, auto=True):
+        self.host, self.port, self.auto = host, port, auto
+        self.child = None  # Popen, set only for instances we spawned
+
+    def _port_up(self, timeout):
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                socket.create_connection((self.host, self.port), timeout=1).close()
+                return True
+            except OSError:
+                if time.monotonic() >= deadline:
+                    return False
+                time.sleep(0.2)
+
+    def _spawn(self):
+        self.child = subprocess.Popen(
+            [str(OPENOCD_EXE), *OPENOCD_ARGS],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=_NO_WINDOW)
+
+    def ensure_up(self):
+        """Adopt or spawn at startup. Returns 'adopted'/'started'/None."""
+        if self._port_up(0.5):
+            return "adopted"
+        if not self.auto or not OPENOCD_EXE.exists():
+            return None
+        self._spawn()
+        return "started" if self._port_up(6.0) else None
+
+    def restart(self):
+        """Link has been dead too long: kill the wedged session, spawn fresh.
+        Returns False (no-op) when supervision is disabled or the binary is
+        missing."""
+        if not self.auto or not OPENOCD_EXE.exists():
+            return False
+        if self.child is not None:
+            self.child.terminate()
+            try:
+                self.child.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.child.kill()
+            self.child = None
+        else:
+            subprocess.run(["taskkill", "/IM", "openocd.exe", "/F"],
+                           capture_output=True, creationflags=_NO_WINDOW)
+        self._spawn()
+        self._port_up(6.0)
+        return True
+
+    def shutdown(self):
+        if self.child is None:
+            return
+        self.child.terminate()
+        try:
+            self.child.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            self.child.kill()
+        self.child = None
 
 
 class Hub:
@@ -79,11 +161,25 @@ class Hub:
             self._clients.discard(conn)
 
 
-def poll_loop(hub, host, port, hz, ctl):
+def poll_loop(hub, host, port, hz, ctl, ocd_server):
     """Forever: read the Telemetry struct and broadcast it. Reconnects to
-    OpenOCD on failure so the page just shows 'disconnected' meanwhile."""
+    OpenOCD on failure; if the link stays dead for RESTART_AFTER_S, the
+    wedged OpenOCD session is killed and respawned so the dashboard
+    recovers on its own."""
     ocd = None
     last_seq = None
+    dead_since = None  # monotonic time the link first went down
+
+    def note_dead(error):
+        nonlocal dead_since
+        now = time.monotonic()
+        if dead_since is None:
+            dead_since = now
+        if now - dead_since >= RESTART_AFTER_S and ocd_server.restart():
+            error += " -- OpenOCD was killed and restarted"
+            dead_since = time.monotonic()  # the fresh instance gets a full window
+        hub.publish({"connected": False, "error": error})
+
     while True:
         if ctl.busy.is_set():
             # Build/flash in progress: the target is being reset, don't poll.
@@ -93,14 +189,14 @@ def poll_loop(hub, host, port, hz, ctl):
                 except OSError:
                     pass
                 ocd = None
+            dead_since = None
             time.sleep(0.2)
             continue
         if ocd is None:
             try:
                 ocd = Ocd(host, port)
             except OSError:
-                hub.publish({"connected": False,
-                             "error": f"OpenOCD telnet unreachable at {host}:{port}"})
+                note_dead(f"OpenOCD telnet unreachable at {host}:{port}")
                 time.sleep(2.0)
                 continue
         try:
@@ -112,7 +208,9 @@ def poll_loop(hub, host, port, hz, ctl):
             except OSError:
                 pass
             ocd = None
+            note_dead("OpenOCD link dropped")
             continue
+        dead_since = None
         (seq, roll_deg, pitch_deg, baro_temp_c, baro_pressure_pa, baro_altitude_m,
          ibus_rx_bytes, ibus_frames_ok, ibus_frames_bad) = f[:9]
         ch = list(f[9:9 + NUM_CHANNELS])
@@ -169,8 +267,12 @@ class Controller:
                 self.live = values
                 self._config(values, "applied live (lost on reset unless saved)")
             elif cmd == "save_defaults":
-                fc.save_defaults(msg.get("values", {}))
-                self._config(fc.validate(msg["values"]),
+                values = fc.validate(msg.get("values", {}))
+                fc.save_defaults(values)
+                # Keep the post-flash re-apply in sync with the new defaults;
+                # otherwise _build_flash would clobber them with stale values.
+                self.live = values
+                self._config(values,
                              "saved to attitude_level.hpp -- takes effect after Compile & Flash")
             elif cmd == "build_flash":
                 self._start_job()
@@ -277,12 +379,23 @@ def main():
     ap.add_argument("--http-port", type=int, default=8080)
     ap.add_argument("--ws-port", type=int, default=8081)
     ap.add_argument("--no-open", action="store_true", help="don't auto-open the browser")
+    ap.add_argument("--no-ocd-restart", action="store_true",
+                    help="never kill/respawn OpenOCD; just report link loss")
     args = ap.parse_args()
 
     hub = Hub()
     ctl = Controller(hub, args.host, args.port)
 
-    threading.Thread(target=poll_loop, args=(hub, args.host, args.port, args.rate, ctl), daemon=True).start()
+    ocd_server = OcdServer(args.host, args.port, auto=not args.no_ocd_restart)
+    how = ocd_server.ensure_up()
+    if how == "adopted":
+        print(f"OpenOCD already running on {args.host}:{args.port} -- adopted.")
+    elif how == "started":
+        print("OpenOCD was not running -- started a supervised instance.")
+    else:
+        print(f"OpenOCD unreachable on {args.host}:{args.port} -- will keep retrying in the background.")
+
+    threading.Thread(target=poll_loop, args=(hub, args.host, args.port, args.rate, ctl, ocd_server), daemon=True).start()
 
     ws_server = serve(lambda conn: ws_handler(hub, ctl, args.http_port, conn), "127.0.0.1", args.ws_port)
     threading.Thread(target=ws_server.serve_forever, daemon=True).start()
@@ -298,6 +411,7 @@ def main():
         print("\nStopped.")
     finally:
         ws_server.shutdown()
+        ocd_server.shutdown()
     return 0
 
 

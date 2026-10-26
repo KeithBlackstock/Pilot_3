@@ -12,8 +12,8 @@
 //
 // Pitch acts through elevator, roll through rudder (3CH: yaw induces roll).
 //
-// Signs are bench-verified on the airframe (roll is inverted relative to the
-// naive assumption): a surface offset u moves the angle in the direction of
+// Signs are bench-verified on the airframe (roll is right-wing-down positive
+// after the axis fix in main.cpp): a surface offset u moves the angle in the direction of
 // `sign * u`, so the request for a stick offset s is `sign * s_norm * max`
 // and the output is -sign * (kp * (angle - request) + kd * rate) -- a stick
 // pushed the way it would push the surface asks for the angle that surface
@@ -41,9 +41,11 @@ struct Config {
     float max_roll_deg;   // angle requested at full rudder stick
     float deadband_us;    // stick offset (us) around center that requests level
     float max_output_us;  // authority limit (gentle)
+    float s1_sign;        // servo S1 output direction (<0 reverses about 1500 us)
+    float s4_sign;        // servo S4 output direction
 };
 
-constexpr Config kDefaults = {4.0f, 4.0f, 0.0f, 0.0f, 1.0f, -1.0f, 30.0f, 30.0f, 30.0f, 250.0f};  // DEFAULTS-LINE
+constexpr Config kDefaults = {4.0f, 4.0f, 0.0f, 0.0f, -1.0f, 1.0f, 30.0f, 30.0f, 30.0f, 250.0f, 1.0f, 1.0f};  // DEFAULTS-LINE
 
 constexpr float kMaxKp = 20.0f;
 constexpr float kMaxKd = 5.0f;
@@ -77,6 +79,8 @@ inline Config snapshot() {
     c.max_roll_deg  = clamp_range(g_attitude_config.max_roll_deg, 0.0f, kMaxAngleDeg);
     c.deadband_us   = clamp_range(g_attitude_config.deadband_us, 0.0f, kMaxDeadbandUs);
     c.max_output_us = clamp_range(g_attitude_config.max_output_us, 0.0f, kMaxOutputLimitUs);
+    c.s1_sign       = g_attitude_config.s1_sign < 0.0f ? -1.0f : 1.0f;
+    c.s4_sign       = g_attitude_config.s4_sign < 0.0f ? -1.0f : 1.0f;
     return c;
 }
 

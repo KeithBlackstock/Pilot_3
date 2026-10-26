@@ -129,6 +129,10 @@
       <label for="cfg-max_roll_deg">Max roll (±°, full stick)</label><input id="cfg-max_roll_deg" type="number" step="1" min="0" max="60">
       <label for="cfg-deadband_us">Stick center deadband (±µs)</label><input id="cfg-deadband_us" type="number" step="5" min="0" max="200">
       <label for="cfg-max_output_us">Max authority (±µs)</label><input id="cfg-max_output_us" type="number" step="10" min="0" max="500">
+      <label for="cfg-s1_sign">Servo S1 direction</label>
+      <select id="cfg-s1_sign"><option value="1">normal</option><option value="-1">reversed</option></select>
+      <label for="cfg-s4_sign">Servo S4 direction</label>
+      <select id="cfg-s4_sign"><option value="1">normal</option><option value="-1">reversed</option></select>
     </div>
     <button class="primary" id="btn-apply">Apply live</button>
     <button id="btn-reload">Reload from FC</button>
@@ -205,7 +209,7 @@ function setStatus(cls, text) {
 }
 
 // ---- leveler config + firmware job ----
-const CFG_FIELDS = ["pitch_kp", "roll_kp", "pitch_kd", "roll_kd", "pitch_sign", "roll_sign", "max_pitch_deg", "max_roll_deg", "deadband_us", "max_output_us"];
+const CFG_FIELDS = ["pitch_kp", "roll_kp", "pitch_kd", "roll_kd", "pitch_sign", "roll_sign", "max_pitch_deg", "max_roll_deg", "deadband_us", "max_output_us", "s1_sign", "s4_sign"];
 let ws = null;
 let cfgLoaded = {};   // last values known to be on the FC
 
