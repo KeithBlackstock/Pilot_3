@@ -42,7 +42,7 @@ Failsafe behavior:
 CH6 > 1500 enables a stateless P-D angle loop (`firmware/src/attitude_level.hpp`). The elevator (CH1) and rudder (CH2) sticks become pitch and roll angle requests, up to `max_pitch_deg` / `max_roll_deg` at full stick, and the output replaces the stick offset ahead of the ruddervator mix. Below 1500 the sticks pass straight through; on a stale RX both axes request level.
 
 - **Control law:** `-sign * (Kp * (angle - request) + Kd * gyro_rate)`, limited to +-`max_output_us`. P uses the raw accel angle, D uses the gyro rate and simply opposes angular velocity.
-- **Tuning:** gains, directions, angle limits, deadband and authority are live-editable in the dashboard (below). Defaults in `kDefaults`: Kp 4 us/deg, Kd 0, 30 degrees, +-30 us deadband, +-250 us authority.
+- **Tuning:** gains, directions, angle limits, deadband and authority are live-editable in the dashboard (below). Defaults in `kDefaults`: Kp 4 us/deg, Kd 0.1 us per deg/s, 25 degrees, +-30 us deadband, +-250 us authority.
 - **Limits, by design:** simplicity is chosen over ideal function so it is easy to test on the bench. The accel angle is corrupted by sustained acceleration and vibration, and there is no gyro bias calibration.
 
 ### Yaw induces roll
