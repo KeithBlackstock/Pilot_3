@@ -29,8 +29,7 @@ volatile attitude_level::Config g_attitude_config = {
     attitude_level::kDefaults.pitch_sign,  attitude_level::kDefaults.roll_sign,
     attitude_level::kDefaults.max_pitch_deg, attitude_level::kDefaults.max_roll_deg,
     attitude_level::kDefaults.deadband_us, attitude_level::kDefaults.max_output_us,
-    attitude_level::kDefaults.s1_sign,     attitude_level::kDefaults.s4_sign,
-    attitude_level::kDefaults.trim_pitch_deg};
+    attitude_level::kDefaults.trim_pitch_deg, attitude_level::kDefaults.trim_pitch_us};
 
 namespace {
 
@@ -206,13 +205,12 @@ int main() {
             rud  = static_cast<int16_t>(attitude_level::pitch(lvl, pitch_req, filter.pitch_deg(), s.gyro_dps[1]));
             elev = static_cast<int16_t>(attitude_level::roll(lvl, roll_req, filter.roll_deg(), s.gyro_dps[0]));
         }
-        // Per-servo reverse (mirrored mounting), applied to the final mix so it
-        // holds in both direct and stabilize mode.
-        attitude_level::Config dir = attitude_level::snapshot();
+        // Pitch subtrim: a fixed offset on the pitch (differential) term after
+        // the loop, so it also trims direct mode. + = nose up, i.e. the same
+        // direction as a stick pull (which drives ch2 low, `rud` negative).
+        rud = static_cast<int16_t>(rud - static_cast<int16_t>(attitude_level::snapshot().trim_pitch_us));
         int16_t s1_off = static_cast<int16_t>(-elev + rud);
         int16_t s4_off = static_cast<int16_t>(-elev - rud);
-        if (dir.s1_sign < 0.0f) s1_off = -s1_off;
-        if (dir.s4_sign < 0.0f) s4_off = -s4_off;
         g_telemetry.pwm_s1_us = servo_pwm::set_s1_us(mix_us(s1_off));
         g_telemetry.pwm_s4_us = servo_pwm::set_s4_us(mix_us(s4_off));
         // Throttle = iBus channel 3 (index 2) -> ESC on PWM_S2. Cut to off

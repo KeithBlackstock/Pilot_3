@@ -5,13 +5,15 @@
 // opposes angular velocity (it wants 0 deg/s), so there are no rate limits
 // and no cascade -- the two terms just act together on the surface offset.
 //
-// The pilot's sticks are angle requests: full CH1 deflection asks for
-// +-max_pitch_deg, full CH2 for +-max_roll_deg, centered sticks ask for level.
+// The pilot's sticks are angle requests: full CH2 deflection (the pitch stick,
+// differential slot) asks for +-max_pitch_deg, full CH1 (common slot) for
+// +-max_roll_deg, centered sticks ask for level.
 // The loop outputs a surface offset that drives the measured angle toward the
 // requested one. (Outside stabilize mode the sticks bypass this entirely.)
 // Kd defaults to a small value (0.1 us per deg/s); tune it from the dashboard.
 //
-// Pitch acts through elevator, roll through rudder (3CH: yaw induces roll).
+// V-tail: pitch is the differential S1/S4 term (ch2), roll is the common term
+// (ch1) -- see the mix comment in main.cpp (3CH: yaw induces roll).
 //
 // Signs are bench-verified on the airframe (roll is right-wing-down positive
 // after the axis fix in main.cpp): a surface offset u moves the angle in the direction of
@@ -38,16 +40,15 @@ struct Config {
     float roll_kd;
     float pitch_sign;     // only the sign matters (<0 inverts)
     float roll_sign;
-    float max_pitch_deg;  // angle requested at full elevator stick
-    float max_roll_deg;   // angle requested at full rudder stick
+    float max_pitch_deg;  // angle requested at full pitch stick (ch2)
+    float max_roll_deg;   // angle requested at full roll stick (ch1)
     float deadband_us;    // stick offset (us) around center that requests level
     float max_output_us;  // authority limit (gentle)
-    float s1_sign;        // servo S1 output direction (<0 reverses about 1500 us)
-    float s4_sign;        // servo S4 output direction
     float trim_pitch_deg; // pitch angle held with centered sticks (+ = nose up)
+    float trim_pitch_us;  // pitch subtrim added after the loop, all modes (+ = nose up)
 };
 
-constexpr Config kDefaults = {4.0f, 4.0f, 0.1f, 0.1f, -1.0f, 1.0f, 30.0f, 30.0f, 30.0f, 250.0f, 1.0f, 1.0f, 5.0f};  // DEFAULTS-LINE
+constexpr Config kDefaults = {4.0f, 4.0f, 0.1f, 0.1f, -1.0f, 1.0f, 25.0f, 25.0f, 30.0f, 250.0f, 5.0f, 0.0f};  // DEFAULTS-LINE
 
 constexpr float kMaxKp = 20.0f;
 constexpr float kMaxKd = 5.0f;
@@ -55,6 +56,7 @@ constexpr float kMaxAngleDeg = 60.0f;
 constexpr float kMaxDeadbandUs = 200.0f;
 constexpr float kStickFullUs = 500.0f;  // full stick deflection from center
 constexpr float kMaxOutputLimitUs = 500.0f;
+constexpr float kMaxTrimUs = 200.0f;
 
 }  // namespace attitude_level
 
@@ -81,9 +83,8 @@ inline Config snapshot() {
     c.max_roll_deg  = clamp_range(g_attitude_config.max_roll_deg, 0.0f, kMaxAngleDeg);
     c.deadband_us   = clamp_range(g_attitude_config.deadband_us, 0.0f, kMaxDeadbandUs);
     c.max_output_us = clamp_range(g_attitude_config.max_output_us, 0.0f, kMaxOutputLimitUs);
-    c.s1_sign       = g_attitude_config.s1_sign < 0.0f ? -1.0f : 1.0f;
-    c.s4_sign       = g_attitude_config.s4_sign < 0.0f ? -1.0f : 1.0f;
     c.trim_pitch_deg = clamp_range(g_attitude_config.trim_pitch_deg, -kMaxAngleDeg, kMaxAngleDeg);
+    c.trim_pitch_us  = clamp_range(g_attitude_config.trim_pitch_us, -kMaxTrimUs, kMaxTrimUs);
     return c;
 }
 
