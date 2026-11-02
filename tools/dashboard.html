@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<!-- Pilot_3 live dashboard. Served by tools/pilot3_dashboard.py, which also
+     pushes telemetry JSON over WebSocket. No build step. The Waypoints map
+     loads Leaflet from cdnjs and tiles from OpenStreetMap (needs internet);
+     the rest of the page works without it. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pilot_3 Dashboard</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<style>
+  :root {
+    --bg: #101418; --card: #1a2028; --edge: #2a323d;
+    --fg: #d7dee6; --dim: #7d8894; --accent: #4fc3f7;
+    --ok: #66bb6a; --warn: #ffb74d; --bad: #ef5350;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; background: var(--bg); color: var(--fg);
+    font: 14px/1.4 "Segoe UI", system-ui, sans-serif;
+  }
+  header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 16px; }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  #status { font-size: 13px; color: var(--dim); }
+  #status .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+                 margin-right: 5px; background: var(--bad); }
+  #status.live .dot { background: var(--ok); }
+  #status.stale .dot { background: var(--warn); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+  .card { background: var(--card); border: 1px solid var(--edge); border-radius: 8px; padding: 14px 16px; }
+  .card h2 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase;
+             letter-spacing: .08em; color: var(--dim); font-weight: 600; }
+  .readouts { display: flex; gap: 24px; flex-wrap: wrap; }
+  .readout .val { font: 600 26px/1.1 "Consolas", monospace; }
+  .readout .lbl { color: var(--dim); font-size: 12px; margin-top: 2px; }
+  .readout .val small { font-size: 13px; color: var(--dim); font-weight: 400; }
+  canvas { display: block; margin: 0 auto 10px; }
+  .stats { color: var(--dim); font-size: 12px; margin-bottom: 10px; font-family: Consolas, monospace; }
+  .ch { display: grid; grid-template-columns: 44px 1fr 52px; align-items: center; gap: 8px; margin: 3px 0; }
+  .ch .name { color: var(--dim); font-size: 12px; font-family: Consolas, monospace; }
+  .ch .bar { height: 10px; background: #0c0f13; border-radius: 5px; overflow: hidden; }
+  .ch .bar i { display: block; height: 100%; width: 0; background: var(--accent);
+               border-radius: 5px; transition: width .08s linear; }
+  .ch .num { font: 12px Consolas, monospace; text-align: right; }
+  .cfg { display: grid; grid-template-columns: 1fr 96px; gap: 6px 10px; align-items: center; margin-bottom: 10px; }
+  .cfg label { color: var(--dim); font-size: 12px; }
+  .cfg input, .cfg select { width: 100%; background: #0c0f13; color: var(--fg); border: 1px solid var(--edge);
+                            border-radius: 4px; padding: 4px 6px; font: 13px Consolas, monospace; }
+  .cfg input.dirty, .cfg select.dirty { border-color: var(--warn); }
+  button { background: #243040; color: var(--fg); border: 1px solid var(--edge); border-radius: 5px;
+           padding: 6px 12px; font: 13px "Segoe UI", sans-serif; cursor: pointer; margin: 0 6px 6px 0; }
+  button:hover:enabled { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: #1f4e6b; }
+  button.danger { background: #6b2f2f; }
+  .note { font-size: 12px; color: var(--dim); min-height: 1.4em; }
+  .note.err { color: var(--bad); }
+  .modebadge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; background: #2a323d; }
+  .modebadge.on { background: #1d4d2b; color: var(--ok); }
+  .modebadge.override { background: #5a4519; color: var(--warn); }
+  #wp-card { grid-column: 1 / -1; }
+  #wp-body { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 16px; }
+  @media (max-width: 800px) { #wp-body { grid-template-columns: 1fr; } }
+  #map { height: 440px; border-radius: 6px; border: 1px solid var(--edge); background: #0c0f13; }
+  #wp-list { font: 12px Consolas, monospace; max-height: 360px; overflow: auto; }
+  #wp-list .row { display: grid; grid-template-columns: 24px 1fr auto; gap: 6px; align-items: center;
+                  padding: 3px 0; border-bottom: 1px solid var(--edge); }
+  #wp-list .row .leg { color: var(--dim); }
+  #wp-list .row button { padding: 0 6px; margin: 0; font-size: 12px; }
+  .wp-pin span { display: block; width: 26px; height: 26px; line-height: 24px; text-align: center;
+                 border-radius: 50%; background: #1f4e6b; color: #fff; border: 2px solid #fff;
+                 font: 600 12px Consolas, monospace; box-shadow: 0 1px 4px rgba(0,0,0,.5); }
+  .ac-arrow svg { display: block; filter: drop-shadow(0 1px 2px rgba(0,0,0,.6)); }
+  pre#joblog { background: #0c0f13; border: 1px solid var(--edge); border-radius: 5px; padding: 8px;
+               max-height: 180px; overflow: auto; font: 11px/1.35 Consolas, monospace; white-space: pre-wrap; margin: 8px 0 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Pilot_3</h1>
+  <span id="status"><span class="dot"></span><span id="status-text">connecting…</span></span>
+</header>
+
+<div class="grid">
+  <section class="card">
+    <h2>Attitude (IMU)</h2>
+    <canvas id="horizon" width="260" height="200"></canvas>
+    <div class="readouts">
+      <div class="readout"><div class="val" id="roll">–</div><div class="lbl">Roll</div></div>
+      <div class="readout"><div class="val" id="pitch">–</div><div class="lbl">Pitch</div></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Barometer</h2>
+    <div class="readouts">
+      <div class="readout"><div class="val" id="baro-t">–</div><div class="lbl">Temperature</div></div>
+      <div class="readout"><div class="val" id="baro-p">–</div><div class="lbl">Pressure</div></div>
+      <div class="readout"><div class="val" id="baro-a">–</div><div class="lbl">Altitude</div></div>
+    </div>
+    <button id="btn-baro-zero" style="margin-top:12px">Altitude Calibration</button>
+    <div class="note" id="baro-note"></div>
+  </section>
+
+  <section class="card">
+    <h2>GPS (u-blox)</h2>
+    <div class="readouts">
+      <div class="readout"><div class="val" id="gps-fix">–</div><div class="lbl">Fix</div></div>
+      <div class="readout"><div class="val" id="gps-sats">–</div><div class="lbl">Satellites</div></div>
+    </div>
+    <div class="readouts" style="margin-top:12px">
+      <div class="readout"><div class="val" id="gps-lat">–</div><div class="lbl">Latitude</div></div>
+      <div class="readout"><div class="val" id="gps-lon">–</div><div class="lbl">Longitude</div></div>
+    </div>
+    <div class="readouts" style="margin-top:12px">
+      <div class="readout"><div class="val" id="gps-alt">–</div><div class="lbl">Altitude (MSL)</div></div>
+      <div class="readout"><div class="val" id="gps-spd">–</div><div class="lbl">Ground speed</div></div>
+      <div class="readout"><div class="val" id="gps-crs">–</div><div class="lbl">Course</div></div>
+    </div>
+    <div class="stats" id="gps-stats" style="margin-top:12px">–</div>
+  </section>
+
+  <section class="card" id="wp-card">
+    <h2>Waypoints</h2>
+    <div id="wp-body">
+      <div id="map"></div>
+      <div>
+        <button id="btn-wp-center">Center on aircraft</button>
+        <button id="btn-wp-clear">Clear waypoints</button>
+        <div class="note" id="wp-note">Click the map to add a waypoint; drag to move; right-click a pin to delete.</div>
+        <div id="wp-list"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Transmitter (IBUS)</h2>
+    <div class="stats" id="ibus-stats">–</div>
+    <div id="channels"></div>
+    <div class="readouts" style="margin-top:12px">
+      <div class="readout"><div class="val" id="pwm-s1">–</div><div class="lbl">PWM S1</div></div>
+      <div class="readout"><div class="val" id="pwm-s4">–</div><div class="lbl">PWM S4</div></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Attitude leveler (CH6)</h2>
+    <div class="stats" style="margin-bottom:8px">Sticks request angles; P on accel angle, D on gyro rate.
+      State: <span class="modebadge" id="lvl-state">–</span></div>
+    <div class="cfg" id="cfg">
+      <label for="cfg-pitch_kp">Pitch Kp (µs/°)</label><input id="cfg-pitch_kp" type="number" step="0.1" min="0" max="20">
+      <label for="cfg-roll_kp">Roll Kp (µs/°)</label><input id="cfg-roll_kp" type="number" step="0.1" min="0" max="20">
+      <label for="cfg-pitch_kd">Pitch Kd (µs per °/s)</label><input id="cfg-pitch_kd" type="number" step="0.05" min="0" max="5">
+      <label for="cfg-roll_kd">Roll Kd (µs per °/s)</label><input id="cfg-roll_kd" type="number" step="0.05" min="0" max="5">
+      <label for="cfg-pitch_sign">Pitch Direction</label>
+      <select id="cfg-pitch_sign"><option value="1">normal</option><option value="-1">inverted</option></select>
+      <label for="cfg-roll_sign">Roll Direction</label>
+      <select id="cfg-roll_sign"><option value="1">normal</option><option value="-1">inverted</option></select>
+      <label for="cfg-max_pitch_deg">Max pitch (±°, full stick)</label><input id="cfg-max_pitch_deg" type="number" step="1" min="0" max="60">
+      <label for="cfg-max_roll_deg">Max roll (±°, full stick)</label><input id="cfg-max_roll_deg" type="number" step="1" min="0" max="60">
+      <label for="cfg-trim_pitch_deg">SAS pitch trim (°, + = nose up)</label><input id="cfg-trim_pitch_deg" type="number" step="0.5" min="-60" max="60">
+      <label for="cfg-trim_pitch_us">Pitch Trim (µs, all modes, + = nose up)</label><input id="cfg-trim_pitch_us" type="number" step="1" min="-200" max="200">
+      <label for="cfg-deadband_us">Stick center deadband (±µs)</label><input id="cfg-deadband_us" type="number" step="5" min="0" max="200">
+      <label for="cfg-max_output_us">Max authority (±µs)</label><input id="cfg-max_output_us" type="number" step="10" min="0" max="500">
+    </div>
+    <button class="primary" id="btn-apply">Apply live</button>
+    <button id="btn-reload">Reload from FC</button>
+    <button id="btn-save">Save as firmware defaults</button>
+    <div class="note" id="cfg-note">Live values are lost on reset unless saved as defaults and flashed.</div>
+  </section>
+
+  <section class="card">
+    <h2>Firmware</h2>
+    <button class="danger" id="btn-flash">Compile &amp; Flash</button>
+    <div class="note" id="job-note">Builds firmware/ and flashes the connected FC over SWD.</div>
+    <pre id="joblog" hidden></pre>
+  </section>
+</div>
+
+<script>
+const WS_URL = "ws://" + location.hostname + ":__WS_PORT__";
+const CH_MIN = 800, CH_MAX = 2200;  // IBUS pulse range for bar scaling
+
+// u-blox UBX fixType values
+const GPS_FIX = { 0: "No fix", 1: "Dead reckoning", 2: "2D", 3: "3D", 4: "GNSS + DR", 5: "Time only" };
+
+const statusEl =document.getElementById("status");
+const statusText = document.getElementById("status-text");
+const channelsEl = document.getElementById("channels");
+const horizon = document.getElementById("horizon").getContext("2d");
+
+// Pre-build one row per channel; rows are reused on every update.
+const chRows = [];
+for (let i = 0; i < 14; i++) {
+  const row = document.createElement("div");
+  row.className = "ch";
+  row.innerHTML = `<span class="name">CH${i + 1}</span><span class="bar"><i></i></span><span class="num">–</span>`;
+  channelsEl.appendChild(row);
+  chRows.push({ bar: row.querySelector("i"), num: row.querySelector(".num") });
+}
+
+function fmt(v, digits, unit) {
+  return v.toFixed(digits) + (unit ? `<small> ${unit}</small>` : "");
+}
+function signedFmt(v, digits, unit) {
+  return (v >= 0 ? "+" : "") + fmt(v, digits, unit);
+}
+
+function drawHorizon(rollDeg, pitchDeg) {
+  const ctx = horizon, W = 260, H = 200, cx = W / 2, cy = H / 2;
+  const pxPerDeg = 2.2;  // pitch scale
+  ctx.clearRect(0, 0, W, H);
+  ctx.save();
+  ctx.beginPath(); ctx.arc(cx, cy, 95, 0, 2 * Math.PI); ctx.clip();
+  ctx.translate(cx, cy);
+  ctx.rotate(-rollDeg * Math.PI / 180);
+  ctx.translate(0, pitchDeg * pxPerDeg);
+  // sky / ground
+  ctx.fillStyle = "#1e3a5f"; ctx.fillRect(-200, -200, 400, 200);
+  ctx.fillStyle = "#4a3220"; ctx.fillRect(-200, 0, 400, 200);
+  ctx.strokeStyle = "#d7dee6"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(-200, 0); ctx.lineTo(200, 0); ctx.stroke();
+  ctx.restore();
+  // fixed aircraft reference mark
+  ctx.strokeStyle = "#ffb74d"; ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(cx - 30, cy); ctx.lineTo(cx - 10, cy); ctx.lineTo(cx, cy + 8);
+  ctx.lineTo(cx + 10, cy); ctx.lineTo(cx + 30, cy);
+  ctx.stroke();
+  // bezel
+  ctx.strokeStyle = "#2a323d"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(cx, cy, 95, 0, 2 * Math.PI); ctx.stroke();
+}
+
+function setStatus(cls, text) {
+  statusEl.className = cls;
+  statusText.textContent = text;
+}
+
+// ---- leveler config + firmware job ----
+const CFG_FIELDS = ["pitch_kp", "roll_kp", "pitch_kd", "roll_kd", "pitch_sign", "roll_sign", "max_pitch_deg", "max_roll_deg", "deadband_us", "max_output_us", "trim_pitch_deg", "trim_pitch_us"];
+let ws = null;
+let cfgLoaded = {};   // last values known to be on the FC
+
+const cfgEl = (n) => document.getElementById("cfg-" + n);
+function cfgNote(text, err) {
+  const el = document.getElementById("cfg-note");
+  el.textContent = text; el.className = "note" + (err ? " err" : "");
+}
+function sendCmd(obj) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
+  else cfgNote("Not connected to the dashboard server.", true);
+}
+function cfgValues() {
+  const v = {};
+  CFG_FIELDS.forEach(n => { v[n] = parseFloat(cfgEl(n).value); });
+  return v;
+}
+function markDirty() {
+  CFG_FIELDS.forEach(n => {
+    const el = cfgEl(n);
+    el.classList.toggle("dirty", cfgLoaded[n] !== undefined && parseFloat(el.value) !== cfgLoaded[n]);
+  });
+}
+CFG_FIELDS.forEach(n => { cfgEl(n).addEventListener("input", markDirty); cfgEl(n).addEventListener("change", markDirty); });
+
+function applyConfig(m) {
+  cfgLoaded = m.values;
+  CFG_FIELDS.forEach(n => {
+    const el = cfgEl(n);
+    el.value = el.tagName === "SELECT" ? String(m.values[n] < 0 ? -1 : 1) : m.values[n];
+  });
+  markDirty();
+  cfgNote(m.note || "", false);
+}
+function validValues() {
+  const v = cfgValues();
+  if (Object.values(v).some(x => Number.isNaN(x))) { cfgNote("Enter a number in every field.", true); return null; }
+  return v;
+}
+
+document.getElementById("btn-apply").onclick = () => { const v = validValues(); if (v) sendCmd({ cmd: "set_config", values: v }); };
+document.getElementById("btn-reload").onclick = () => sendCmd({ cmd: "get_config" });
+document.getElementById("btn-save").onclick = () => { const v = validValues(); if (v) sendCmd({ cmd: "save_defaults", values: v }); };
+document.getElementById("btn-baro-zero").onclick = () => {
+  const note = document.getElementById("baro-note");
+  note.className = "note"; note.textContent = "Sampling pressure for ~2 s…";
+  document.getElementById("btn-baro-zero").disabled = true;
+  sendCmd({ cmd: "baro_zero" });
+};
+function updateBaroCal(m) {
+  const note = document.getElementById("baro-note");
+  note.className = "note" + (m.ok ? "" : " err"); note.textContent = m.note;
+  document.getElementById("btn-baro-zero").disabled = false;
+}
+document.getElementById("btn-flash").onclick = () => sendCmd({
+  cmd: "build_flash",
+  // Map waypoints are baked into the firmware at build time (waypoints.hpp).
+  waypoints: wps.map(w => { const p = w.marker.getLatLng(); return [p.lat, p.lng]; }),
+});
+
+function updateJob(m) {
+  const note = document.getElementById("job-note"), log = document.getElementById("joblog"),
+        btn = document.getElementById("btn-flash");
+  const busy = m.state === "building" || m.state === "flashing";
+  btn.disabled = busy;
+  note.className = "note" + (m.state === "error" ? " err" : "");
+  note.textContent = { building: "Compiling…", flashing: "Flashing — telemetry paused…",
+                       done: "Done.", error: "Failed." }[m.state] || "";
+  log.hidden = !m.log;
+  log.textContent = m.log || "";
+  log.scrollTop = log.scrollHeight;
+  ["btn-apply", "btn-reload", "btn-save", "btn-baro-zero"].forEach(id => { document.getElementById(id).disabled = busy; });
+}
+
+function updateLevelerState(ch) {
+  const el = document.getElementById("lvl-state");
+  const on = ch[5] > 1500 && ch[5] <= 2100;
+  el.className = "modebadge" + (on ? " on" : "");
+  el.textContent = on ? "angle mode (CH6 > 1500)" : "off — sticks direct";
+}
+
+function update(m) {
+  if (m.type === "config") { applyConfig(m); return; }
+  if (m.type === "config_error") { cfgNote(m.error, true); return; }
+  if (m.type === "job") { updateJob(m); return; }
+  if (m.type === "baro_cal") { updateBaroCal(m); return; }
+  if (!m.connected) {
+    setStatus("", m.error || "waiting for device…");
+    return;
+  }
+  setStatus(m.stale ? "stale" : "live",
+            (m.stale ? "STALE — firmware not running? " : "live ") + `seq ${m.seq}`);
+
+  drawHorizon(m.roll_deg, m.pitch_deg);
+  document.getElementById("roll").innerHTML  = signedFmt(m.roll_deg, 2, "°");
+  document.getElementById("pitch").innerHTML = signedFmt(m.pitch_deg, 2, "°");
+
+  document.getElementById("baro-t").innerHTML = signedFmt(m.baro_temp_c, 2, "°C");
+  document.getElementById("baro-p").innerHTML = fmt(m.baro_pressure_pa / 100, 2, "hPa");
+  document.getElementById("baro-a").innerHTML = signedFmt(m.baro_altitude_m, 2, "m");
+
+  if (m.gps) {
+    const g = m.gps;
+    const hasFix = g.fix >= 2;
+    document.getElementById("gps-fix").innerHTML =
+      `<span style="color:var(--${hasFix ? "ok" : "warn"})">${GPS_FIX[g.fix] || "type " + g.fix}</span>`;
+    document.getElementById("gps-sats").textContent = g.sats;
+    if (hasFix) {
+      // Map cursor heading: live magnetometer when the module answered at
+      // boot, else GPS course-over-ground (meaningless below walking speed).
+      const hdg = (m.mag && m.mag.present) ? m.mag.heading_deg : g.course_deg;
+      updateAircraft(g.lat_deg, g.lon_deg, hdg);
+    }
+    document.getElementById("gps-lat").innerHTML = hasFix ? signedFmt(g.lat_deg, 7, "°") : "–";
+    document.getElementById("gps-lon").innerHTML = hasFix ? signedFmt(g.lon_deg, 7, "°") : "–";
+    document.getElementById("gps-alt").innerHTML = hasFix ? fmt(g.alt_m, 1, "m") : "–";
+    document.getElementById("gps-spd").innerHTML = hasFix ? fmt(g.speed_mps, 1, "m/s") : "–";
+    document.getElementById("gps-crs").innerHTML = hasFix ? fmt(g.course_deg, 1, "°") : "–";
+    document.getElementById("gps-stats").textContent =
+      `rx ${g.rx_bytes} B   frames ok ${g.sentences_ok}   bad ${g.sentences_bad}` +
+      (m.mag ? (m.mag.present
+        ? `   mag hdg ${m.mag.heading_deg.toFixed(1)}°   ok ${m.mag.reads_ok}   err ${m.mag.errors}`
+        : "   mag: not detected") : "");
+  }
+
+  document.getElementById("ibus-stats").textContent =
+    `rx ${m.ibus_rx_bytes} B   frames ok ${m.ibus_frames_ok}   bad ${m.ibus_frames_bad}`;
+  m.ibus_ch.forEach((v, i) => {
+    const pct = Math.max(0, Math.min(1, (v - CH_MIN) / (CH_MAX - CH_MIN)));
+    chRows[i].bar.style.width = (pct * 100).toFixed(1) + "%";
+    chRows[i].num.textContent = v;
+  });
+  updateLevelerState(m.ibus_ch);
+  document.getElementById("pwm-s1").innerHTML = fmt(m.pwm_s1_us, 0, "µs");
+  document.getElementById("pwm-s4").innerHTML = fmt(m.pwm_s4_us, 0, "µs");
+}
+
+// ---- waypoint planning (live in this page; baked into the firmware on Compile & Flash) ----
+const WP_MAX = 16;
+const wps = [];          // { marker: L.Marker }
+let wpMap = null, wpLine = null, acMarker = null, acPlaced = false;
+
+function distM(a, b) {   // haversine, metres
+  const R = 6371000, rad = Math.PI / 180;
+  const dLat = (b.lat - a.lat) * rad, dLon = (b.lng - a.lng) * rad;
+  const h = Math.sin(dLat / 2) ** 2 +
+            Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+const fmtDist = (m) => m >= 1000 ? (m / 1000).toFixed(2) + " km" : m.toFixed(0) + " m";
+const wpIcon = (n) => L.divIcon({ className: "wp-pin", html: `<span>${n}</span>`,
+                                  iconSize: [26, 26], iconAnchor: [13, 13] });
+
+function renderWps() {
+  const pts = wps.map(w => w.marker.getLatLng());
+  wps.forEach((w, i) => w.marker.setIcon(wpIcon(i + 1)));
+  wpLine.setLatLngs(pts);
+  const list = document.getElementById("wp-list");
+  list.textContent = "";
+  let total = 0;
+  pts.forEach((p, i) => {
+    const leg = i > 0 ? distM(pts[i - 1], p) : 0;
+    total += leg;
+    const row = document.createElement("div"); row.className = "row";
+    const n = document.createElement("span"); n.textContent = i + 1;
+    const pos = document.createElement("span");
+    pos.textContent = `${p.lat.toFixed(6)}, ${p.lng.toFixed(6)}`;
+    const right = document.createElement("span");
+    const legEl = document.createElement("span"); legEl.className = "leg";
+    legEl.textContent = i > 0 ? fmtDist(leg) + " " : "";
+    const del = document.createElement("button"); del.textContent = "✕"; del.title = "Delete waypoint";
+    del.onclick = () => removeWp(i);
+    right.append(legEl, del);
+    row.append(n, pos, right);
+    list.append(row);
+  });
+  document.getElementById("wp-note").textContent = wps.length
+    ? `${wps.length} / ${WP_MAX} waypoints, route ${fmtDist(total)}.`
+    : "Click the map to add a waypoint; drag to move; right-click a pin to delete.";
+}
+
+function removeWp(i) {
+  wpMap.removeLayer(wps[i].marker);
+  wps.splice(i, 1);
+  renderWps();
+}
+
+function addWp(latlng) {
+  if (wps.length >= WP_MAX) {
+    document.getElementById("wp-note").textContent = `Waypoint limit reached (${WP_MAX}).`;
+    return;
+  }
+  const marker = L.marker(latlng, { draggable: true, icon: wpIcon(wps.length + 1) }).addTo(wpMap);
+  const w = { marker };
+  marker.on("drag", () => wpLine.setLatLngs(wps.map(x => x.marker.getLatLng())));
+  marker.on("dragend", renderWps);
+  marker.on("contextmenu", () => removeWp(wps.indexOf(w)));
+  wps.push(w);
+  renderWps();
+}
+
+function updateAircraft(lat, lon, course) {
+  if (!wpMap) return;
+  if (!acMarker) {
+    const svg = '<svg width="26" height="26" viewBox="-13 -13 26 26"><path d="M0-11 L8 9 L0 5 L-8 9 Z" ' +
+                'fill="#ffb74d" stroke="#fff" stroke-width="1.5"/></svg>';
+    acMarker = L.marker([lat, lon], { interactive: false, zIndexOffset: 1000,
+      icon: L.divIcon({ className: "ac-arrow", html: svg, iconSize: [26, 26], iconAnchor: [13, 13] }) });
+  }
+  acMarker.setLatLng([lat, lon]);
+  if (!wpMap.hasLayer(acMarker)) acMarker.addTo(wpMap);
+  const el = acMarker.getElement();
+  if (el && el.firstChild) el.firstChild.style.transform = `rotate(${course || 0}deg)`;
+  if (!acPlaced) { acPlaced = true; if (!wps.length) wpMap.setView([lat, lon], 17); }
+}
+
+function initWaypoints() {
+  if (!window.L) {   // Leaflet CDN unreachable (offline): leave the card inert
+    document.getElementById("map").textContent = "Map unavailable: Leaflet could not be loaded (no internet?).";
+    document.getElementById("wp-note").textContent = "";
+    return;
+  }
+  wpMap = L.map("map").setView([0, 0], 2);
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+              { maxZoom: 19, attribution: "&copy; OpenStreetMap contributors" }).addTo(wpMap);
+  wpLine = L.polyline([], { color: "#4fc3f7", weight: 3 }).addTo(wpMap);
+  wpMap.on("click", (e) => addWp(e.latlng));
+  document.getElementById("btn-wp-center").onclick = () => { if (acMarker) wpMap.setView(acMarker.getLatLng(), Math.max(wpMap.getZoom(), 17)); };
+  document.getElementById("btn-wp-clear").onclick = () => {
+    wps.forEach(w => wpMap.removeLayer(w.marker)); wps.length = 0; renderWps();
+  };
+}
+initWaypoints();
+
+// Connect, and reconnect automatically whenever the socket drops.
+function connect() {
+  const sock = new WebSocket(WS_URL);
+  ws = sock;
+  sock.onopen = () => { setStatus("", "connected, waiting for data…"); sendCmd({ cmd: "get_config" }); };
+  sock.onmessage = (e) => update(JSON.parse(e.data));
+  sock.onclose = () => { setStatus("", "server disconnected — retrying…"); setTimeout(connect, 1000); };
+  sock.onerror = () => sock.close();
+}
+connect();
+</script>
+</body>
+</html>
