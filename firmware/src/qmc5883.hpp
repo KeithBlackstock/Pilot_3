@@ -30,7 +30,7 @@ struct Cal {
 
 // What the firmware boots with -- the dashboard's calibration save rewrites
 // this one line; g_mag_cal (qmc5883.cpp) is the live RAM copy.
-constexpr Cal kCalDefaults = {-522.1f, 372.233f, -474.533f, 1.07222f, -0.936897f};  // MAGCAL-DEFAULTS-LINE
+constexpr Cal kCalDefaults = {-807.25f, 193.15f, -241.167f, 0.890311f, -1.14052f};  // MAGCAL-DEFAULTS-LINE
 
 // False = chip absent or wrong ID; the caller then leaves mag_* telemetry
 // untouched (present flag stays 0).
