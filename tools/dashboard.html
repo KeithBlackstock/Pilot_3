@@ -121,6 +121,22 @@
     <div class="stats" id="gps-stats" style="margin-top:12px">–</div>
   </section>
 
+  <section class="card">
+    <h2>Compass (QMC5883L)</h2>
+    <div class="readouts">
+      <div class="readout"><div class="val" id="mag-hdg">–</div><div class="lbl">Mag heading</div></div>
+    </div>
+    <button id="btn-mag-cal" style="margin-top:12px">Compass Calibration</button>
+    <button id="btn-mag-capture" disabled>Capture pose</button>
+    <button id="btn-mag-cancel" disabled>Cancel</button>
+    <div class="note" id="mag-note">Six poses: N (known true north), E, S, W, nose up, nose down.</div>
+    <div id="mag-result" hidden>
+      <div class="stats" id="mag-cal-values" style="margin-top:8px"></div>
+      <button class="primary" id="btn-mag-apply">Apply live</button>
+      <button id="btn-mag-save">Save as firmware defaults</button>
+    </div>
+  </section>
+
   <section class="card" id="wp-card">
     <h2>Waypoints</h2>
     <div id="wp-body">
@@ -289,6 +305,63 @@ document.getElementById("btn-baro-zero").onclick = () => {
   document.getElementById("btn-baro-zero").disabled = true;
   sendCmd({ cmd: "baro_zero" });
 };
+// ---- compass calibration wizard (6 poses; math in pilot3_fc_control.compute_six_pose_cal) ----
+const MAG_POSE_PROMPTS = [
+  "Pose 1/6 — NORTH (true): point the nose at true north using a reference compass, then take the reference away from the aircraft. Hold still, Capture.",
+  "Pose 2/6 — EAST: rotate ~90° clockwise, hold still, Capture.",
+  "Pose 3/6 — SOUTH: rotate ~90° again, hold still, Capture.",
+  "Pose 4/6 — WEST: rotate ~90° again, hold still, Capture.",
+  "Pose 5/6 — NOSE UP: hold the aircraft nose-vertical (any heading), Capture.",
+  "Pose 6/6 — NOSE DOWN: flip a full 180° to nose-down (any heading), Capture.",
+];
+let magCal = { values: null, headingOffset: null };
+const magNote = (t, err) => { const el = document.getElementById("mag-note"); el.textContent = t; el.className = "note" + (err ? " err" : ""); };
+function magWizardReset() {
+  document.getElementById("btn-mag-cal").disabled = false;
+  document.getElementById("btn-mag-capture").disabled = true;
+  document.getElementById("btn-mag-cancel").disabled = true;
+}
+document.getElementById("btn-mag-cal").onclick = () => {
+  magCal = { values: null, headingOffset: null };
+  document.getElementById("mag-result").hidden = true;
+  document.getElementById("btn-mag-capture").disabled = false;
+  document.getElementById("btn-mag-cancel").disabled = false;
+  document.getElementById("btn-mag-cal").disabled = true;
+  magNote(MAG_POSE_PROMPTS[0]);
+};
+document.getElementById("btn-mag-cancel").onclick = () => sendCmd({ cmd: "mag_cal_abort" });
+document.getElementById("btn-mag-capture").onclick = () => {
+  document.getElementById("btn-mag-capture").disabled = true;
+  sendCmd({ cmd: "mag_cal_capture" });
+};
+document.getElementById("btn-mag-apply").onclick = () =>
+  sendCmd({ cmd: "mag_cal_apply", values: magCal.values, heading_offset: magCal.headingOffset });
+document.getElementById("btn-mag-save").onclick = () =>
+  sendCmd({ cmd: "mag_cal_save", values: magCal.values, heading_offset: magCal.headingOffset });
+
+function updateMagCal(m) {
+  if (!m.ok) {  // refused capture / failed compute: let the user retry the pose
+    magNote(m.note, true);
+    document.getElementById("btn-mag-capture").disabled = false;
+    return;
+  }
+  if (m.values && m.poses === 6) {  // ritual complete: offer the result
+    magCal = { values: m.values, headingOffset: m.heading_offset };
+    document.getElementById("mag-cal-values").textContent = m.note;
+    document.getElementById("mag-result").hidden = false;
+    magWizardReset();
+    magNote("Calibration computed — Apply live or Save, then rotate the aircraft and watch the heading.");
+    return;
+  }
+  if (m.poses > 0 && m.poses < 6) {  // pose captured: advance the prompt
+    magNote(m.note + " " + MAG_POSE_PROMPTS[m.poses]);
+    document.getElementById("btn-mag-capture").disabled = false;
+    return;
+  }
+  magWizardReset();  // abort ack, or apply/save ack
+  magNote(m.note);
+}
+
 function updateBaroCal(m) {
   const note = document.getElementById("baro-note");
   note.className = "note" + (m.ok ? "" : " err"); note.textContent = m.note;
@@ -326,6 +399,7 @@ function update(m) {
   if (m.type === "config_error") { cfgNote(m.error, true); return; }
   if (m.type === "job") { updateJob(m); return; }
   if (m.type === "baro_cal") { updateBaroCal(m); return; }
+  if (m.type === "mag_cal") { updateMagCal(m); return; }
   if (!m.connected) {
     setStatus("", m.error || "waiting for device…");
     return;
@@ -336,6 +410,8 @@ function update(m) {
   drawHorizon(m.roll_deg, m.pitch_deg);
   document.getElementById("roll").innerHTML  = signedFmt(m.roll_deg, 2, "°");
   document.getElementById("pitch").innerHTML = signedFmt(m.pitch_deg, 2, "°");
+  document.getElementById("mag-hdg").innerHTML =
+    (m.mag && m.mag.present) ? fmt(m.mag.heading_deg, 1, "°") : "–";
 
   document.getElementById("baro-t").innerHTML = signedFmt(m.baro_temp_c, 2, "°C");
   document.getElementById("baro-p").innerHTML = fmt(m.baro_pressure_pa / 100, 2, "hPa");

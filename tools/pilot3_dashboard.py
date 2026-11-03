@@ -252,6 +252,7 @@ class Controller:
         self.busy = threading.Event()
         self._job_lock = threading.Lock()
         self.live = None  # last values applied from the dashboard this session
+        self.cal_poses = []  # compass ritual: averaged raw poses captured so far
 
     def _job(self, state, log=""):
         self.hub.broadcast({"type": "job", "state": state, "log": log})
@@ -278,6 +279,22 @@ class Controller:
                              "saved to attitude_level.hpp -- takes effect after Compile & Flash")
             elif cmd == "baro_zero":
                 self._baro_zero()
+            elif cmd == "mag_cal_capture":
+                self._mag_cal_capture()
+            elif cmd == "mag_cal_abort":
+                self.cal_poses.clear()
+                self._mag_cal(True, "Calibration aborted.", poses=0)
+            elif cmd == "mag_cal_apply":
+                values = fc.write_mag_cal(self.link, msg.get("values", {}))
+                fc.write_declination(self.link, msg.get("heading_offset", 0.0))
+                self._mag_cal(True, "applied live (lost on reset unless saved)", values,
+                              msg.get("heading_offset"))
+            elif cmd == "mag_cal_save":
+                values = fc.validate_mag_cal(msg.get("values", {}))
+                fc.save_mag_cal_defaults(values)
+                fc.save_declination_default(msg.get("heading_offset", 0.0))
+                self._mag_cal(True, "saved to qmc5883.hpp + main.cpp -- takes effect after Compile & Flash",
+                              values, msg.get("heading_offset"))
             elif cmd == "build_flash":
                 self._start_job(msg.get("waypoints"))
             else:
@@ -289,6 +306,48 @@ class Controller:
 
     def _baro_cal(self, ok, note):
         self.hub.broadcast({"type": "baro_cal", "ok": ok, "note": note}, sticky=False)
+
+    def _mag_cal(self, ok, note, values=None, heading_offset=None, poses=None):
+        self.hub.broadcast({"type": "mag_cal", "ok": ok, "note": note, "values": values,
+                            "heading_offset": heading_offset,
+                            "poses": len(self.cal_poses) if poses is None else poses},
+                           sticky=False)
+
+    def _mag_cal_capture(self):
+        """Average ~1.5 s of raw mag from the live telemetry as one ritual
+        pose; refused if the pose isn't still or the mag is absent. The 6th
+        pose completes the set and computes the calibration."""
+        samples = []
+        for _ in range(15):
+            with self.hub._lock:
+                latest = self.hub.latest
+            m = json.loads(latest) if latest else {}
+            mag = m.get("mag") or {}
+            if m.get("connected") and not m.get("stale") and mag.get("present"):
+                samples.append((mag["x"], mag["y"], mag["z"]))
+            time.sleep(0.1)
+        if len(samples) < 10:
+            self._mag_cal(False, "Capture failed: no live magnetometer data.")
+            return
+        xs, ys, zs = zip(*samples)
+        spread = max(max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs))
+        if spread > 150:
+            self._mag_cal(False, f"Capture refused: field moved {spread:.0f} counts "
+                                 "during sampling -- hold the pose still and retry.")
+            return
+        self.cal_poses.append((sum(xs) / len(xs), sum(ys) / len(ys), sum(zs) / len(zs)))
+        n = len(self.cal_poses)
+        if n < 6:
+            self._mag_cal(True, f"Pose {n} of 6 captured.")
+            return
+        try:
+            values, heading_offset, note = fc.compute_six_pose_cal(self.cal_poses)
+        except fc.ControlError as e:
+            self.cal_poses.clear()
+            self._mag_cal(False, f"Calibration failed: {e}", poses=0)
+            return
+        self.cal_poses.clear()
+        self._mag_cal(True, note, values, heading_offset, poses=6)
 
     def _baro_zero(self):
         """Average ~2 s of baro pressure from the live telemetry and make it

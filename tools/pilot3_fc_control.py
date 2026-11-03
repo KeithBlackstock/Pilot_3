@@ -249,3 +249,164 @@ def build():
         return False, "build timed out"
     log = (res.stdout + res.stderr).strip()
     return res.returncode == 0, log
+
+
+# ---- magnetometer calibration + PATH declination ----
+# Field order/limits mirror qmc5883::Cal (qmc5883.hpp) and the firmware's
+# per-sample sanitizer (qmc5883.cpp). These take the OcdLink explicitly;
+# the methods above predate the compass.
+import math as _math
+
+MAG_CAL_FIELDS = ("off_x", "off_y", "off_z", "scale_x", "scale_y")
+MAG_CAL_LIMITS = {"off_x": (-8000.0, 8000.0), "off_y": (-8000.0, 8000.0),
+                  "off_z": (-8000.0, 8000.0), "scale_x": (0.1, 10.0), "scale_y": (0.1, 10.0)}
+MAGCAL_HEADER = FIRMWARE / "src" / "qmc5883.hpp"
+MAGCAL_RE = re.compile(
+    r"(constexpr Cal kCalDefaults = \{)[^}]*(\};  // MAGCAL-DEFAULTS-LINE)")
+# PATH's heading-offset default lives in main.cpp's g_path_config initializer
+# (marked line, same rewrite pattern as the other defaults).
+MAIN_CPP = FIRMWARE / "src" / "main.cpp"
+PATH_DECL_RE = re.compile(
+    r"(volatile path_mode::Config g_path_config = \{[^,]+,[^,]+,[^,]+, )[-+0-9.eEf]+"
+    r"(, \{\}\};  // PATH-DEFAULTS-LINE)")
+# Byte offset of declination_deg in path_mode::Config: uint32 count, float
+# k_path, float capture_radius_m come first.
+PATH_DECL_BYTE_OFFSET = 12
+
+
+def validate_mag_cal(values):
+    """Return a clean {field: float} dict or raise ControlError."""
+    out = {}
+    for name in MAG_CAL_FIELDS:
+        if name not in values:
+            raise ControlError(f"missing field {name}")
+        try:
+            v = float(values[name])
+        except (TypeError, ValueError):
+            raise ControlError(f"{name}: not a number")
+        lo, hi = MAG_CAL_LIMITS[name]
+        if not (v == v) or v < lo or v > hi:  # also rejects NaN
+            raise ControlError(f"{name}: {v} outside [{lo}, {hi}]")
+        out[name] = v
+    return out
+
+
+def read_mag_cal(link):
+    addr = symbol_address("g_mag_cal")
+    out = link.command(f"mdw 0x{addr:08x} {len(MAG_CAL_FIELDS)}")
+    words = []
+    for line in LINE_RE.findall(out):
+        words += [int(w, 16) for w in line.split()]
+    if len(words) < len(MAG_CAL_FIELDS):
+        raise ControlError(f"mdw returned {len(words)} words: {out.strip()!r}")
+    vals = struct.unpack(f"<{len(MAG_CAL_FIELDS)}f",
+                         struct.pack(f"<{len(MAG_CAL_FIELDS)}I", *words[:len(MAG_CAL_FIELDS)]))
+    return {n: round(v, 6) for n, v in zip(MAG_CAL_FIELDS, vals)}
+
+
+def write_mag_cal(link, values):
+    """Write the 5 calibration floats to g_mag_cal and verify the readback."""
+    values = validate_mag_cal(values)
+    addr = symbol_address("g_mag_cal")
+    for i, name in enumerate(MAG_CAL_FIELDS):
+        word = struct.unpack("<I", struct.pack("<f", values[name]))[0]
+        link.command(f"mww 0x{addr + 4 * i:08x} 0x{word:08x}")
+    back = read_mag_cal(link)
+    for name in MAG_CAL_FIELDS:
+        if abs(back[name] - values[name]) > 1e-4:
+            raise ControlError(f"{name} read back {back[name]} (wrote {values[name]})")
+    return back
+
+
+def write_declination(link, deg):
+    """Set PATH's heading offset (deg) in g_path_config (RAM; lost on
+    reset/reflash). Measured by the compass ritual's north pose -- absorbs
+    declination and mounting yaw in one number."""
+    deg = float(deg)
+    if not (-90.0 <= deg <= 90.0):  # also rejects NaN
+        raise ControlError(f"declination {deg} outside [-90, 90]")
+    addr = symbol_address("g_path_config") + PATH_DECL_BYTE_OFFSET
+    word = struct.unpack("<I", struct.pack("<f", deg))[0]
+    link.command(f"mww 0x{addr:08x} 0x{word:08x}")
+    out = link.command(f"mdw 0x{addr:08x} 1")
+    words = [int(w, 16) for line in LINE_RE.findall(out) for w in line.split()]
+    if not words or words[0] != word:
+        raise ControlError(f"declination read back {out.strip()!r}")
+
+
+def compute_six_pose_cal(poses):
+    """Six-pose compass calibration. poses = [(x, y, z), ...] of averaged raw
+    counts in the fixed order N, E, S, W, UP, DOWN. N is a known-true-north
+    facing (pointed carefully); E/S/W only need to be ~90 deg apart; UP/DOWN
+    are nose vertical, 180 deg apart about the pitch axis, any azimuth.
+
+    The x/y offsets are the mean of the four planar poses (the horizontal
+    field cancels over a full turn); the z offset is the UP/DOWN midpoint --
+    the planar poses all see the same vertical field, so only a flip about a
+    horizontal axis isolates off_z. Scales equalize the planar N-S and E-W
+    spans. The heading offset (what to add to a mag heading to get a true
+    bearing) is measured at the N pose -- it absorbs declination, mounting
+    yaw and residual cal bias in one number, and is stored in path_mode's
+    declination_deg.
+
+    Returns (cal_values, heading_offset_deg, note)."""
+    if len(poses) != 6:
+        raise ControlError("need exactly 6 poses")
+    n, e, s, w, up, dn = poses
+    planar = (n, e, s, w)
+    off_x = sum(p[0] for p in planar) / 4.0
+    off_y = sum(p[1] for p in planar) / 4.0
+    off_z = (up[2] + dn[2]) / 2.0
+    span_x = abs(n[0] - s[0])
+    span_y = abs(e[1] - w[1])
+    span_z = abs(up[2] - dn[2])
+    if min(span_x, span_y) < 100.0:
+        raise ControlError(f"planar poses too similar (spans {span_x:.0f}/{span_y:.0f} counts)"
+                           " -- rotate ~90 deg between facings")
+    if span_z < 100.0:
+        raise ControlError(f"vertical poses too similar (z span {span_z:.0f} counts)"
+                           " -- flip a full 180 deg between nose-up and nose-down")
+    mean_span = (span_x + span_y) / 2.0
+    scale_x = mean_span / span_x
+    scale_y = mean_span / span_y
+    # Corrected heading at the north pose -> offset to true north.
+    cx = (n[0] - off_x) * scale_x
+    cy = (n[1] - off_y) * scale_y
+    hdg_n = _math.degrees(_math.atan2(cy, cx)) % 360.0
+    heading_offset = -((hdg_n + 180.0) % 360.0 - 180.0)  # wrap180(-hdg_n)
+    values = {"off_x": off_x, "off_y": off_y, "off_z": off_z,
+              "scale_x": scale_x, "scale_y": scale_y}
+    ecc = abs(span_x - span_y) / mean_span
+    note = (f"offset ({off_x:.0f}, {off_y:.0f}, {off_z:.0f}) counts, "
+            f"scale ({scale_x:.3f}, {scale_y:.3f}), eccentricity {ecc:.1%}, "
+            f"heading offset {heading_offset:+.1f} deg")
+    return values, heading_offset, note
+
+
+def save_mag_cal_defaults(values):
+    """Rewrite the kCalDefaults line in qmc5883.hpp so the next build boots
+    with this calibration."""
+    values = validate_mag_cal(values)
+    with open(MAGCAL_HEADER, encoding="utf-8", newline="") as f:
+        text = f.read()
+    items = ", ".join(_cfloat(values[n]) for n in MAG_CAL_FIELDS)
+    new, n = MAGCAL_RE.subn(lambda m: f"{m.group(1)}{items}{m.group(2)}", text)
+    if n != 1:
+        raise ControlError("could not find the MAGCAL-DEFAULTS-LINE in qmc5883.hpp")
+    with open(MAGCAL_HEADER, "w", encoding="utf-8", newline="") as f:
+        f.write(new)
+
+
+def save_declination_default(deg):
+    """Rewrite the declination value in main.cpp's g_path_config initializer
+    (PATH-DEFAULTS-LINE) so the next build boots with this heading offset."""
+    deg = float(deg)
+    if not (-90.0 <= deg <= 90.0):
+        raise ControlError(f"declination {deg} outside [-90, 90]")
+    with open(MAIN_CPP, encoding="utf-8", newline="") as f:
+        text = f.read()
+    new, n = PATH_DECL_RE.subn(lambda m: f"{m.group(1)}{_cfloat(deg)}{m.group(2)}", text)
+    if n != 1:
+        raise ControlError("could not find the PATH-DEFAULTS-LINE in main.cpp")
+    with open(MAIN_CPP, "w", encoding="utf-8", newline="") as f:
+        f.write(new)

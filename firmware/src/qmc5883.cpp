@@ -17,7 +17,11 @@ constexpr uint8_t kChipIdExpect = 0xFF;  // QMC5883L ID register reads all-ones
 
 // OSR=512, range=8 G, ODR=100 Hz, continuous mode.
 constexpr uint8_t kCtrl1Continuous = 0x19;
-constexpr uint8_t kStatusDrdy = 0x01;
+// Read data on DRDY *or* DOR: if the chip ever skips a sample unread (boot
+// timing, bus contention), DOR sets and DRDY stops asserting until someone
+// reads the data registers -- gating reads on DRDY alone deadlocks
+// (observed on the bench: status stuck at 0x04 until a manual data read).
+constexpr uint8_t kStatusDataReady = 0x05;  // DRDY | DOR
 
 volatile uint32_t g_reads_ok = 0;
 volatile uint32_t g_errors = 0;
@@ -28,7 +32,20 @@ bool read_u8(uint8_t reg, uint8_t& out) {
     return false;
 }
 
+float clampf(float v, float lo, float hi) {
+    if (!(v >= lo)) return lo;  // also catches NaN
+    if (v > hi) return hi;
+    return v;
+}
+
 }  // namespace
+
+// Live magnetometer calibration; the dashboard finds it by symbol name and
+// rewrites it over SWD. Re-read (and sanitized) on every sample, so a bad
+// live write degrades the heading instead of NaN-ing it.
+volatile qmc5883::Cal g_mag_cal = {
+    qmc5883::kCalDefaults.off_x, qmc5883::kCalDefaults.off_y, qmc5883::kCalDefaults.off_z,
+    qmc5883::kCalDefaults.scale_x, qmc5883::kCalDefaults.scale_y};
 
 namespace qmc5883 {
 
@@ -54,7 +71,7 @@ bool step(Reading& out) {
     case STATUS: {
         uint8_t status = 0;
         if (!read_u8(kRegStatus, status)) return false;
-        if (status & kStatusDrdy) {
+        if (status & kStatusDataReady) {
             idx = 0;
             state = READING;
         }
@@ -73,8 +90,12 @@ bool step(Reading& out) {
     out.x = static_cast<int16_t>(raw[0] | (raw[1] << 8));
     out.y = static_cast<int16_t>(raw[2] | (raw[3] << 8));
     out.z = static_cast<int16_t>(raw[4] | (raw[5] << 8));
-    float hdg = std::atan2(static_cast<float>(out.y), static_cast<float>(out.x)) *
-                57.29577951308232f;
+    // Heading uses the calibrated field; telemetry keeps the raw counts.
+    float cx = (static_cast<float>(out.x) - clampf(g_mag_cal.off_x, -8000.0f, 8000.0f)) *
+               clampf(g_mag_cal.scale_x, 0.1f, 10.0f);
+    float cy = (static_cast<float>(out.y) - clampf(g_mag_cal.off_y, -8000.0f, 8000.0f)) *
+               clampf(g_mag_cal.scale_y, 0.1f, 10.0f);
+    float hdg = std::atan2(cy, cx) * 57.29577951308232f;
     if (hdg < 0.0f) hdg += 360.0f;
     out.heading_deg = hdg;
     g_reads_ok++;
