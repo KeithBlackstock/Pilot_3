@@ -25,12 +25,12 @@ struct Stats {
 // the planar ritual captures x/y only, and the heading is planar.
 struct Cal {
     float off_x, off_y, off_z;  // raw counts
-    float scale_x, scale_y;     // dimensionless, ~1.0
+    float scale_x, scale_y;     // dimensionless, ~1.0; negative = mirrored module
 };
 
 // What the firmware boots with -- the dashboard's calibration save rewrites
 // this one line; g_mag_cal (qmc5883.cpp) is the live RAM copy.
-constexpr Cal kCalDefaults = {0.0f, 0.0f, 0.0f, 1.0f, 1.0f};  // MAGCAL-DEFAULTS-LINE
+constexpr Cal kCalDefaults = {-522.1f, 372.233f, -474.533f, 1.07222f, -0.936897f};  // MAGCAL-DEFAULTS-LINE
 
 // False = chip absent or wrong ID; the caller then leaves mag_* telemetry
 // untouched (present flag stays 0).

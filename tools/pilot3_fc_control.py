@@ -285,7 +285,12 @@ def validate_mag_cal(values):
         except (TypeError, ValueError):
             raise ControlError(f"{name}: not a number")
         lo, hi = MAG_CAL_LIMITS[name]
-        if not (v == v) or v < lo or v > hi:  # also rejects NaN
+        if name.startswith("scale"):
+            # Scales may be negative (mirrored-module correction); the
+            # limits bound the magnitude.
+            if not (v == v) or not (lo <= abs(v) <= hi):  # also rejects NaN
+                raise ControlError(f"{name}: |{v}| outside [{lo}, {hi}]")
+        elif not (v == v) or v < lo or v > hi:  # also rejects NaN
             raise ControlError(f"{name}: {v} outside [{lo}, {hi}]")
         out[name] = v
     return out
@@ -369,17 +374,34 @@ def compute_six_pose_cal(poses):
     mean_span = (span_x + span_y) / 2.0
     scale_x = mean_span / span_x
     scale_y = mean_span / span_y
+
+    def wrap180(d):
+        return (d + 180.0) % 360.0 - 180.0
+
+    def heading(px, py, sx, sy):
+        return _math.degrees(_math.atan2((py - off_y) * sy, (px - off_x) * sx)) % 360.0
+
+    # Chirality check from the E pose: the poses were captured rotating
+    # clockwise, so the corrected heading must *increase* by ~90 deg from N
+    # to E. A mirrored (flipped) module runs backwards -- corrected with a
+    # negative y scale, which turns the reflection back into a rotation
+    # (the north-pose offset then rides on top as usual).
+    h_n = heading(n[0], n[1], scale_x, scale_y)
+    h_e = heading(e[0], e[1], scale_x, scale_y)
+    mirrored = abs(wrap180((h_e - h_n) + 90.0)) < abs(wrap180((h_e - h_n) - 90.0))
+    if mirrored:
+        scale_y = -scale_y
+        h_n = heading(n[0], n[1], scale_x, scale_y)
     # Corrected heading at the north pose -> offset to true north.
-    cx = (n[0] - off_x) * scale_x
-    cy = (n[1] - off_y) * scale_y
-    hdg_n = _math.degrees(_math.atan2(cy, cx)) % 360.0
-    heading_offset = -((hdg_n + 180.0) % 360.0 - 180.0)  # wrap180(-hdg_n)
+    heading_offset = wrap180(-h_n)
     values = {"off_x": off_x, "off_y": off_y, "off_z": off_z,
               "scale_x": scale_x, "scale_y": scale_y}
     ecc = abs(span_x - span_y) / mean_span
     note = (f"offset ({off_x:.0f}, {off_y:.0f}, {off_z:.0f}) counts, "
             f"scale ({scale_x:.3f}, {scale_y:.3f}), eccentricity {ecc:.1%}, "
             f"heading offset {heading_offset:+.1f} deg")
+    if mirrored:
+        note += " -- mirrored module detected, corrected with negative y scale"
     return values, heading_offset, note
 
 

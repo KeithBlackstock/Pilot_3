@@ -38,6 +38,15 @@ float clampf(float v, float lo, float hi) {
     return v;
 }
 
+// Scale may be negative: a mirrored (flipped) module makes the heading run
+// backwards, and the ritual corrects it with a negative scale. Sanitize to
+// magnitude [0.1, 10] preserving sign; NaN -> 1.
+float sanitize_scale(float v) {
+    if (!(v == v)) return 1.0f;  // NaN
+    if (v < 0.0f) return clampf(v, -10.0f, -0.1f);
+    return clampf(v, 0.1f, 10.0f);
+}
+
 }  // namespace
 
 // Live magnetometer calibration; the dashboard finds it by symbol name and
@@ -92,9 +101,9 @@ bool step(Reading& out) {
     out.z = static_cast<int16_t>(raw[4] | (raw[5] << 8));
     // Heading uses the calibrated field; telemetry keeps the raw counts.
     float cx = (static_cast<float>(out.x) - clampf(g_mag_cal.off_x, -8000.0f, 8000.0f)) *
-               clampf(g_mag_cal.scale_x, 0.1f, 10.0f);
+               sanitize_scale(g_mag_cal.scale_x);
     float cy = (static_cast<float>(out.y) - clampf(g_mag_cal.off_y, -8000.0f, 8000.0f)) *
-               clampf(g_mag_cal.scale_y, 0.1f, 10.0f);
+               sanitize_scale(g_mag_cal.scale_y);
     float hdg = std::atan2(cy, cx) * 57.29577951308232f;
     if (hdg < 0.0f) hdg += 360.0f;
     out.heading_deg = hdg;
