@@ -27,7 +27,7 @@ SRAM address:
     uint32_t gps_rx_bytes, gps_sentences_ok, gps_sentences_bad;
     uint16_t gps_sats, gps_fix;
     int16_t  mag_x, mag_y, mag_z;  uint16_t mag_present;
-    float    mag_heading_deg;      (atan2(y, x), magnetic, uncalibrated)
+    float    mag_heading_deg;      (atan2(y, x) of calibrated field, magnetic)
     uint32_t mag_reads_ok, mag_errors;      (124 bytes total)
 """
 import argparse
