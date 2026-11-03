@@ -11,10 +11,12 @@
 // as plain stabilize. Nothing uploads waypoints yet (dashboard planner is
 // planning-only); until then the array can only be written over SWD.
 //
-// Heading is the QMC5883L magnetic heading + declination_deg. The mag has no
-// tilt compensation or hard-iron calibration yet and its mounting orientation
-// is not bench-verified -- see telemetry.hpp. Heading is assumed clockwise-
-// positive from north, same as the bearing; verify on the bench before flight.
+// Heading is the QMC5883L magnetic heading (hard-iron/scale calibrated, with
+// mirrored-module correction -- see qmc5883.hpp) + declination_deg, which the
+// dashboard's compass calibration sets as the heading offset to true north.
+// The mag has no tilt compensation yet and its mounting orientation is not
+// bench-verified -- see telemetry.hpp. Heading is assumed clockwise-positive
+// from north, same as the bearing; verify on the bench before flight.
 //
 // Roll sign: roll is right-wing-down positive (main.cpp), so a positive bank
 // request = right turn = heading increasing.

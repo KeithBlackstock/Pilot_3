@@ -33,8 +33,10 @@ struct Telemetry {
     uint16_t gps_sats;
     uint16_t gps_fix;  // UBX fixType: 0 none, 2 2D, 3 3D, 4 GNSS+DR
     // QMC5883L magnetometer on the GPS module (I2C1, shared with the BMP280;
-    // see qmc5883.cpp). Raw counts in the datasheet axis frame; heading is
-    // atan2(y, x), magnetic, no declination, orientation not bench-verified.
+    // see qmc5883.cpp). mag_x/y/z are raw counts in the datasheet axis frame;
+    // heading is atan2(y, x) of the calibrated field (g_mag_cal offsets and
+    // scales), magnetic, no declination or tilt compensation, orientation not
+    // bench-verified.
     int16_t mag_x;
     int16_t mag_y;
     int16_t mag_z;

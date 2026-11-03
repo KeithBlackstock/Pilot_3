@@ -78,11 +78,11 @@ A roll-only navigation overlay, modelled on the PATH mode in the author's INAV f
 
 - **Steering:** `bank_deg = k_PATH * heading_error_deg`, clamped to `max_roll_deg`. `k_PATH` is bank degrees per degree of heading error (the fork's default of 50 is 0.5 here). The result replaces the CH1 roll stick offset ahead of `attitude_level::roll`, so the existing angle loop does the flying and no new inner loop is needed.
 - **Route:** switching PATH on always restarts at waypoint 1. A waypoint counts as reached when the aircraft is inside a tunable capture radius. At the end of the route, PATH holds wings level.
-- **Heading:** QMC5883L compass in the HGLRC M100 Pro GPS module, on I2C1 via the GPS connector (SCL/SDA, pins 5 and 6), shared with the BMP280. Expected address 0x0D, to be confirmed with a bus scan. Needs: a driver, hard-iron calibration (dashboard button), tilt compensation from the existing roll/pitch, and a magnetic declination setting.
+- **Heading:** QMC5883L compass in the HGLRC M100 Pro GPS module, on I2C1 via the GPS connector (SCL/SDA, pins 5 and 6), shared with the BMP280. Address 0x0D. The driver, six-pose hard-iron/scale calibration (dashboard "Compass Calibration" button, with mirrored-module detection) and the heading offset to true north (`declination_deg`) are implemented. Still needed: tilt compensation from the existing roll/pitch.
 - **Waypoints:** up to 16 as `lat_e7`, `lon_e7` (altitude later), stored in a reserved flash page so they survive power cycles. The dashboard's Waypoints planner would upload them over SWD, bench only.
 - **Not in the first version:** waypoint altitude, loiter at end of route, and a descent-rate guard like INAV's CALM.
 
-Suggested order: compass driver and heading readout, then calibration and declination, then flash storage and upload, then PATH itself.
+Suggested order: compass tilt compensation, then flash storage and upload, then PATH itself. (The compass driver, calibration and heading offset are done.)
 
 ## Layout
 
