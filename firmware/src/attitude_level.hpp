@@ -48,7 +48,13 @@ struct Config {
     float trim_pitch_us;  // pitch subtrim added after the loop, all modes (+ = nose up)
 };
 
-constexpr Config kDefaults = {4.0f, 4.0f, 0.1f, 0.1f, -1.0f, 1.0f, 25.0f, 25.0f, 30.0f, 250.0f, 5.0f, 0.0f};  // DEFAULTS-LINE
+constexpr Config kDefaults = {3.0f, 3.0f, 0.4f, 0.4f, -1.0f, 1.0f, 20.0f, 20.0f, 30.0f, 250.0f, 5.0f, 0.0f};  // DEFAULTS-LINE
+
+// Cutoff of the one-pole low-pass on the gyro rate fed to the D term (see
+// RateLpf). Deliberately not a live tunable: a mild fixed value (~4 ms of lag)
+// that just keeps vibration out of the servos. 0 disables it. Must stay below
+// the 100 Hz Nyquist of the 200 Hz loop.
+constexpr float kRateLpfHz = 40.0f;
 
 constexpr float kMaxKp = 20.0f;
 constexpr float kMaxKd = 5.0f;
@@ -87,6 +93,29 @@ inline Config snapshot() {
     c.trim_pitch_us  = clamp_range(g_attitude_config.trim_pitch_us, -kMaxTrimUs, kMaxTrimUs);
     return c;
 }
+
+// One-pole low-pass for the gyro rate used by the D term (the angle estimate
+// keeps the raw gyro). Discretised with the measured dt so loop overruns
+// don't shift the cutoff. cutoff_hz <= 0 passes the input straight through and
+// tracks it, so enabling the filter live doesn't start from a stale state.
+// The first call seeds from the input to avoid a startup transient.
+struct RateLpf {
+    float y = 0.0f;
+    bool seeded = false;
+
+    float update(float x, float cutoff_hz, float dt_s) {
+        if (!seeded || !(cutoff_hz > 0.0f) || !(dt_s > 0.0f)) {
+            y = x;
+            seeded = true;
+            return y;
+        }
+        constexpr float kTwoPi = 6.283185307179586f;
+        float rc = 1.0f / (kTwoPi * cutoff_hz);
+        float a = dt_s / (rc + dt_s);
+        y += a * (x - y);
+        return y;
+    }
+};
 
 // Stick offset -> [-1, 1], zero inside the deadband and ramping from there
 // (no jump at the deadband edge).

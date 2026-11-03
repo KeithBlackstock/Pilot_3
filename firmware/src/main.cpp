@@ -242,6 +242,7 @@ int main() {
     g_telemetry.mag_present = mag_ok ? 1 : 0;
 
     ComplementaryFilter filter;
+    attitude_level::RateLpf roll_rate_lpf, pitch_rate_lpf;  // D-term gyro rates
     uint32_t loop_count = 0;
     uint32_t baro_settle = 0, baro_n = 0;  // boot-time ground zero state
     float baro_sum = 0.0f, baro_first = 0.0f, baro_lo = 0.0f, baro_hi = 0.0f;
@@ -281,6 +282,12 @@ int main() {
         for (int i = 0; i < 3; ++i) s.gyro_dps[i] -= g_gyro_bias_dps[i];
         filter.update(s.accel_g[0], s.accel_g[1], s.accel_g[2],
                       s.gyro_dps[0], s.gyro_dps[1], dt_s);
+        // D-term rates: low-passed copies of the gyro (fixed cutoff, see
+        // attitude_level::kRateLpfHz). Run every tick, in every mode, so the
+        // state is warm when stabilize engages.
+        attitude_level::Config lvl = attitude_level::snapshot();
+        float roll_rate_d  = roll_rate_lpf.update(s.gyro_dps[0], attitude_level::kRateLpfHz, dt_s);
+        float pitch_rate_d = pitch_rate_lpf.update(s.gyro_dps[1], attitude_level::kRateLpfHz, dt_s);
 
         g_telemetry.roll_deg  = filter.roll_deg();
         g_telemetry.pitch_deg = filter.pitch_deg();
@@ -383,12 +390,11 @@ int main() {
         if (stabilize && !prev_stabilize) gyro_cal_start();
         prev_stabilize = stabilize;
         if (stabilize) {
-            attitude_level::Config lvl = attitude_level::snapshot();
             // Pitch is the differential slot (`rud`, ch2); roll is the common
             // slot (`elev`, ch1) -- see the mix comment above.
             float pitch_req = rx_stale ? 0.0f : static_cast<float>(rud);
             float roll_req  = rx_stale ? 0.0f : static_cast<float>(elev);
-            rud  = static_cast<int16_t>(attitude_level::pitch(lvl, pitch_req, filter.pitch_deg(), s.gyro_dps[1]));
+            rud  = static_cast<int16_t>(attitude_level::pitch(lvl, pitch_req, filter.pitch_deg(), pitch_rate_d));
             // GPS is polled later in the loop; the latest published fix is
             // one tick old at most, which is fine for steering.
             path_mode::Config pcfg = path_snapshot();
@@ -401,9 +407,9 @@ int main() {
             if (g_path_state.engaged) {
                 // Bank request replaces the roll stick; pitch stays with the pilot.
                 elev = static_cast<int16_t>(attitude_level::roll_angle(
-                    lvl, po.bank_deg, filter.roll_deg(), s.gyro_dps[0]));
+                    lvl, po.bank_deg, filter.roll_deg(), roll_rate_d));
             } else {
-                elev = static_cast<int16_t>(attitude_level::roll(lvl, roll_req, filter.roll_deg(), s.gyro_dps[0]));
+                elev = static_cast<int16_t>(attitude_level::roll(lvl, roll_req, filter.roll_deg(), roll_rate_d));
             }
         } else {
             g_path_state.engaged = false;
@@ -411,7 +417,7 @@ int main() {
         // Pitch subtrim: a fixed offset on the pitch (differential) term after
         // the loop, so it also trims direct mode. + = nose up, i.e. the same
         // direction as a stick pull (which drives ch2 low, `rud` negative).
-        rud = static_cast<int16_t>(rud - static_cast<int16_t>(attitude_level::snapshot().trim_pitch_us));
+        rud = static_cast<int16_t>(rud - static_cast<int16_t>(lvl.trim_pitch_us));
         int16_t s1_off = static_cast<int16_t>(-elev + rud);
         int16_t s4_off = static_cast<int16_t>(-elev - rud);
         g_telemetry.pwm_s1_us = servo_pwm::set_s1_us(mix_us(s1_off));
