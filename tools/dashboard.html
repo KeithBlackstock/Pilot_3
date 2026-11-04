@@ -400,6 +400,7 @@ function update(m) {
   if (m.type === "job") { updateJob(m); return; }
   if (m.type === "baro_cal") { updateBaroCal(m); return; }
   if (m.type === "mag_cal") { updateMagCal(m); return; }
+  if (m.type === "waypoints") { applyWaypoints(m); return; }
   if (!m.connected) {
     setStatus("", m.error || "waiting for device…");
     return;
@@ -453,7 +454,8 @@ function update(m) {
   document.getElementById("pwm-s4").innerHTML = fmt(m.pwm_s4_us, 0, "µs");
 }
 
-// ---- waypoint planning (live in this page; baked into the firmware on Compile & Flash) ----
+// ---- waypoint planning (edited in this page; baked into the firmware on
+// Compile & Flash, read back from the FC on every config reload) ----
 const WP_MAX = 16;
 const wps = [];          // { marker: L.Marker }
 let wpMap = null, wpLine = null, acMarker = null, acPlaced = false;
@@ -503,6 +505,24 @@ function removeWp(i) {
   renderWps();
 }
 
+function clearWps() {
+  wps.forEach(w => wpMap.removeLayer(w.marker));
+  wps.length = 0;
+}
+
+// Replace the map with a route read back from the FC (config reload).
+function loadWps(points) {
+  if (!wpMap) return;   // map inert (Leaflet failed to load)
+  clearWps();
+  points.slice(0, WP_MAX).forEach(p => addWp(L.latLng(p[0], p[1])));
+  if (points.length) wpMap.setView([points[0][0], points[0][1]], Math.max(wpMap.getZoom(), 15));
+}
+
+function applyWaypoints(m) {
+  if (m.points) loadWps(m.points);   // null on read failure: leave the map alone
+  document.getElementById("wp-note").textContent = m.note || "";
+}
+
 function addWp(latlng) {
   if (wps.length >= WP_MAX) {
     document.getElementById("wp-note").textContent = `Waypoint limit reached (${WP_MAX}).`;
@@ -544,9 +564,7 @@ function initWaypoints() {
   wpLine = L.polyline([], { color: "#4fc3f7", weight: 3 }).addTo(wpMap);
   wpMap.on("click", (e) => addWp(e.latlng));
   document.getElementById("btn-wp-center").onclick = () => { if (acMarker) wpMap.setView(acMarker.getLatLng(), Math.max(wpMap.getZoom(), 17)); };
-  document.getElementById("btn-wp-clear").onclick = () => {
-    wps.forEach(w => wpMap.removeLayer(w.marker)); wps.length = 0; renderWps();
-  };
+  document.getElementById("btn-wp-clear").onclick = () => { clearWps(); renderWps(); };
 }
 initWaypoints();
 

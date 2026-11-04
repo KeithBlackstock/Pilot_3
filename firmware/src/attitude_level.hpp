@@ -48,7 +48,7 @@ struct Config {
     float trim_pitch_us;  // pitch subtrim added after the loop, all modes (+ = nose up)
 };
 
-constexpr Config kDefaults = {3.0f, 3.0f, 0.4f, 0.4f, -1.0f, 1.0f, 20.0f, 20.0f, 30.0f, 250.0f, 5.0f, 0.0f};  // DEFAULTS-LINE
+constexpr Config kDefaults = {3.0f, 3.0f, 0.4f, 0.4f, -1.0f, 1.0f, 40.0f, 20.0f, 30.0f, 250.0f, 5.0f, 0.0f};  // DEFAULTS-LINE
 
 // Cutoff of the one-pole low-pass on the gyro rate fed to the D term (see
 // RateLpf). Deliberately not a live tunable: a mild fixed value (~4 ms of lag)

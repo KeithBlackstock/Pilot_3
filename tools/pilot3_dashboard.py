@@ -260,11 +260,28 @@ class Controller:
     def _config(self, values, note=""):
         self.hub.broadcast({"type": "config", "values": values, "note": note})
 
+    def _send_waypoints(self):
+        """Push the FC's loaded route to the page, so a reload/reconnect
+        repopulates the map with what PATH would actually fly. A read
+        failure only notes itself on the map card -- the config reload that
+        triggered this has already succeeded."""
+        try:
+            points = fc.read_waypoints(self.link)
+        except (fc.ControlError, OSError) as e:
+            self.hub.broadcast({"type": "waypoints", "points": None,
+                                "note": f"Could not read the route: {e}"}, sticky=False)
+            return
+        note = (f"Loaded {len(points)} waypoint(s) from the FC." if points
+                else "The FC has no route loaded.")
+        self.hub.broadcast({"type": "waypoints", "points": points, "note": note},
+                           sticky=False)
+
     def handle(self, msg):
         cmd = msg.get("cmd")
         try:
             if cmd == "get_config":
                 self._config(self.link.read_config(), "read from FC")
+                self._send_waypoints()
             elif cmd == "set_config":
                 values = self.link.write_config(msg.get("values", {}))
                 self.live = values

@@ -233,6 +233,24 @@ def write_waypoints(points):
         f.write(text)
 
 
+def read_waypoints(link):
+    """Read the route out of g_path_config (RAM) as [[lat, lon], ...] degrees
+    -- what PATH would fly right now. Layout mirrors path_mode::Config:
+    count (u32), k_path, capture_radius_m, declination_deg, then wp[16] of
+    (lat_e7, lon_e7) int32 pairs."""
+    addr = symbol_address("g_path_config")
+    n_words = 4 + 2 * 16  # header + kMaxWaypoints pairs
+    out = link.command(f"mdw 0x{addr:08x} {n_words}")
+    words = []
+    for line in LINE_RE.findall(out):
+        words += [int(w, 16) for w in line.split()]
+    if len(words) < n_words:
+        raise ControlError(f"mdw returned {len(words)} words: {out.strip()!r}")
+    count = min(words[0], 16)
+    ints = struct.unpack(f"<{2 * 16}i", struct.pack(f"<{2 * 16}I", *words[4:]))
+    return [[ints[2 * i] / 1e7, ints[2 * i + 1] / 1e7] for i in range(count)]
+
+
 def _cfloat(v):
     s = f"{v:.6g}"
     if not any(c in s for c in ".eE"):
