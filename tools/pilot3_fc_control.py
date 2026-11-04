@@ -268,9 +268,10 @@ MAGCAL_RE = re.compile(
 MAIN_CPP = FIRMWARE / "src" / "main.cpp"
 PATH_DECL_RE = re.compile(
     r"(volatile path_mode::Config g_path_config = \{[^,]+,[^,]+,[^,]+, )[-+0-9.eEf]+"
-    r"(, \{\}\};  // PATH-DEFAULTS-LINE)")
+    r"(, \{\}, [-+0-9.eEf]+\};  // PATH-DEFAULTS-LINE)")
 # Byte offset of declination_deg in path_mode::Config: uint32 count, float
-# k_path, float capture_radius_m come first.
+# k_path, float capture_radius_m come first. (abort_deadband_us is appended
+# after the waypoint array, so this offset is unaffected by it.)
 PATH_DECL_BYTE_OFFSET = 12
 
 

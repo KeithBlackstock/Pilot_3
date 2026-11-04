@@ -20,6 +20,13 @@
 //
 // Roll sign: roll is right-wing-down positive (main.cpp), so a positive bank
 // request = right turn = heading increasing.
+//
+// Pilot abort: roll stick (CH1) past abort_deadband_us latches PATH off and
+// hands roll back to the stick -- the natural "pull it back" reflex when the
+// plane departs or tracks wrong. The latch holds while CH6 stays high (PATH
+// behaves as plain stabilize, so an availability glitch cannot silently
+// re-arm it); the caller clears it when CH6 leaves the high position, and
+// the next rise restarts the route at waypoint 1 as usual.
 #pragma once
 #include <cmath>
 #include <cstdint>
@@ -39,6 +46,8 @@ struct Config {
     float capture_radius_m;  // waypoint reached inside this distance
     float declination_deg;   // magnetic -> true, + = east
     Waypoint wp[kMaxWaypoints];
+    // Appended last: the dashboard reaches declination_deg by byte offset.
+    float abort_deadband_us; // pilot roll stick past this aborts to stabilize
 };
 
 constexpr float kMaxCaptureM = 500.0f;
@@ -74,7 +83,8 @@ inline void bearing_distance(int32_t lat1_e7, int32_t lon1_e7, int32_t lat2_e7, 
 
 struct State {
     bool engaged = false;
-    uint32_t leg = 0;  // index of the waypoint being flown; == count when finished
+    bool aborted = false;  // pilot took the roll stick; latched until CH6 leaves high
+    uint32_t leg = 0;      // index of the waypoint being flown; == count when finished
 };
 
 struct Output {
@@ -88,9 +98,11 @@ inline bool available(const Config& c, bool gps_3d, bool mag_ok, bool rx_ok) {
 }
 
 // Call every loop tick. `want` = switch high AND available(). A rising edge
-// restarts the route at waypoint 1. Returns the bank request.
+// restarts the route at waypoint 1. `pilot_roll_us` is the roll stick offset
+// (us about center): past abort_deadband_us it latches the abort (see the
+// header comment). Returns the bank request.
 inline Output step(State& st, const Config& c, bool want, int32_t lat_e7, int32_t lon_e7,
-                   float mag_heading_deg) {
+                   float mag_heading_deg, float pilot_roll_us) {
     if (!want) {
         st.engaged = false;
         return {0.0f, false};
@@ -100,6 +112,15 @@ inline Output step(State& st, const Config& c, bool want, int32_t lat_e7, int32_
     if (!st.engaged) {
         st.engaged = true;
         st.leg = 0;
+    }
+    // The abort is checked before steering so the pilot's input wins on the
+    // very tick it appears; disengaging here makes the caller run the plain
+    // stabilize path, which already has the stick's roll request in hand.
+    if (st.aborted ||
+        std::fabs(pilot_roll_us) > clampf(c.abort_deadband_us, 0.0f, 500.0f)) {
+        st.engaged = false;
+        st.aborted = true;
+        return {0.0f, false};
     }
     float capture = clampf(c.capture_radius_m, 1.0f, kMaxCaptureM);
     float bearing = 0.0f, dist = 0.0f;
