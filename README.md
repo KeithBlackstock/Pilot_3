@@ -45,6 +45,16 @@ CH6 is a 3-way switch: low (<= 1300) direct, mid (> 1300) stabilize, high (> 170
 - **Gyro bias:** measured on every activation of stabilize mode (rising edge of CH6); there is no calibration at power-up, so the bias is zero until the first activation. The cal is non-blocking -- stabilize engages immediately on the old bias, and a window that isn't quiet (motion/vibration, or an implausible offset) is rejected so the previous bias keeps running.
 - **Limits, by design:** simplicity is chosen over ideal function so it is easy to test on the bench. The accel angle is corrupted by sustained acceleration and vibration.
 
+### PATH (waypoint steering)
+
+A roll-only navigation overlay on stabilize (`firmware/src/path_mode.hpp`), modelled on the PATH mode in the author's INAV fork (`path_mode.c`). CH6 high engages it, but only while waypoints are loaded and a GPS 3D fix, the mag and the RX are all live -- otherwise the high position is silently plain stabilize. PATH flies the route in order by banking toward each waypoint, while the pilot keeps pitch and throttle.
+
+- **Steering:** `bank_deg = k_path * heading_error_deg` (default `k_path` 0.5). The result is a roll angle request that replaces the CH1 roll stick offset ahead of `attitude_level::roll_angle`, so the existing angle loop does the flying and no separate inner loop exists; the clamp to `max_roll_deg` happens there.
+- **Route:** switching PATH on always restarts at waypoint 1. A waypoint counts as reached inside `capture_radius_m` (default 10 m). At the end of the route, PATH holds wings level.
+- **Pilot abort:** the roll stick (CH1) past `abort_deadband_us` (default +-100 us) instantly reverts to plain stabilize -- the natural "pull it back" reflex, no switch needed. The abort latches while CH6 stays high (so an availability glitch cannot re-arm it); moving CH6 off high re-arms, and the next rise restarts the route at waypoint 1.
+- **Heading:** QMC5883L compass in the HGLRC M100 Pro GPS module, on I2C1 via the GPS connector (SCL/SDA, pins 5 and 6), shared with the BMP280. Address 0x0D. The driver, six-pose hard-iron/scale calibration (dashboard "Compass Calibration" button, with mirrored-module detection) and the heading offset to true north (`declination_deg`, live-writable and saveable from the dashboard) are implemented. Still missing: tilt compensation from the existing roll/pitch. The heading sign and module mounting orientation are not bench-verified yet -- verify before flight.
+- **Waypoints:** up to 16 as `lat_e7`, `lon_e7`. The dashboard's Compile & Flash bakes the map's route into a generated `firmware/src/waypoints.hpp`, so the flashed firmware boots with the route loaded and it survives power cycles. There is no live over-SWD upload; changing the route means reflashing.
+
 ### Yaw induces roll
 
 In this 3CH scheme there are no ailerons, so rudder (yaw) input is what induces roll. For control-input purposes, treat the CH2 "rudder" stick as the roll control: yaw and roll are coupled, and any future stabilization or mixing should regard it that way.
@@ -55,7 +65,7 @@ In this 3CH scheme there are no ailerons, so rudder (yaw) input is what induces 
 
 - **Attitude leveler card:** shows whether the angle loop is on, and edits the gains (Kp, Kd), directions, max pitch/roll angles, deadband and authority limit. "Apply live" writes the values into the running FC's RAM over SWD (range-checked in the dashboard and again in the firmware; lost on reset). "Save as firmware defaults" rewrites `kDefaults` in `attitude_level.hpp` so the next build boots with them.
 - **Compile & Flash:** runs `firmware/build.bat`, flashes the ELF through the running OpenOCD (verify + reset), then re-applies any live values and reads the config back. Telemetry pauses while it runs. It resets the board, so remove the prop first.
-- **Waypoint planner:** an OpenStreetMap map (Leaflet, needs internet) for placing, dragging and deleting up to 16 waypoints, with leg distances and the live aircraft position and course. Planning only for now: waypoints live in the page and are not sent to the FC.
+- **Waypoint planner:** an OpenStreetMap map (Leaflet, needs internet) for placing, dragging and deleting up to 16 waypoints, with leg distances and the live aircraft position and course. Compile & Flash bakes the route into a generated `firmware/src/waypoints.hpp`, so the flashed firmware boots with the route loaded (see PATH above).
 
 The dashboard's WebSocket only accepts connections from the dashboard page itself (Origin check), since it can flash the board.
 
@@ -70,20 +80,11 @@ The dashboard's WebSocket only accepts connections from the dashboard page itsel
 
 ## Future features
 
-Not implemented. Design notes only.
+Not implemented. Design notes only. (PATH itself -- steering, route logic, pilot abort, and route loading via Compile & Flash -- is implemented; see Control architecture above.)
 
-### PATH (waypoint steering)
-
-A roll-only navigation overlay, modelled on the PATH mode in the author's INAV fork (`path_mode.c`). Engaged from an RC switch; it flies the uploaded waypoints in order by banking toward each one, while the pilot keeps pitch and throttle.
-
-- **Steering:** `bank_deg = k_PATH * heading_error_deg`, clamped to `max_roll_deg`. `k_PATH` is bank degrees per degree of heading error (the fork's default of 50 is 0.5 here). The result replaces the CH1 roll stick offset ahead of `attitude_level::roll`, so the existing angle loop does the flying and no new inner loop is needed.
-- **Route:** switching PATH on always restarts at waypoint 1. A waypoint counts as reached when the aircraft is inside a tunable capture radius. At the end of the route, PATH holds wings level.
-- **Pilot abort:** the roll stick (CH1) past `abort_deadband_us` (default +-100 us) instantly reverts to plain stabilize -- the natural "pull it back" reflex, no switch needed. The abort latches while CH6 stays high (so an availability glitch cannot re-arm it); moving CH6 off high re-arms, and the next rise restarts the route at waypoint 1.
-- **Heading:** QMC5883L compass in the HGLRC M100 Pro GPS module, on I2C1 via the GPS connector (SCL/SDA, pins 5 and 6), shared with the BMP280. Address 0x0D. The driver, six-pose hard-iron/scale calibration (dashboard "Compass Calibration" button, with mirrored-module detection) and the heading offset to true north (`declination_deg`) are implemented. Still needed: tilt compensation from the existing roll/pitch.
-- **Waypoints:** up to 16 as `lat_e7`, `lon_e7` (altitude later), stored in a reserved flash page so they survive power cycles. The dashboard's Waypoints planner would upload them over SWD, bench only.
-- **Not in the first version:** waypoint altitude, loiter at end of route, and a descent-rate guard like INAV's CALM.
-
-Suggested order: compass tilt compensation, then flash storage and upload, then PATH itself. (The compass driver, calibration and heading offset are done.)
+- **Compass tilt compensation** from the existing roll/pitch estimate. The heading is currently planar, so it is only trustworthy near level.
+- **Live waypoint upload over SWD** (e.g. into a reserved flash page), so the route can change on the bench without a rebuild and reflash.
+- **Waypoint altitude, loiter at end of route, and a descent-rate guard** like INAV's CALM.
 
 ## Layout
 
