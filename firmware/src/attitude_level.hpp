@@ -1,5 +1,5 @@
-// Angle-command loop for pitch and roll: P on the angle error plus D on the
-// gyro rate. Stateless (no integrator, no filter state). The P term uses the
+// Angle-command loop for pitch and roll: P on the angle error (with a soft
+// center: gain ramps up with error, see soft_p) plus D on the gyro rate. Stateless (no integrator, no filter state). The P term uses the
 // complementary-filter angle (gyro-led short term, so brief linear accelerations
 // from launch/throttle/vibration are mostly rejected); the D term uses the gyro rate directly and simply
 // opposes angular velocity (it wants 0 deg/s), so there are no rate limits
@@ -55,6 +55,10 @@ constexpr Config kDefaults = {3.0f, 3.0f, 0.4f, 0.4f, -1.0f, 1.0f, 60.0f, 20.0f,
 // that just keeps vibration out of the servos. 0 disables it. Must stay below
 // the 100 Hz Nyquist of the 200 Hz loop.
 constexpr float kRateLpfHz = 40.0f;
+
+// Width (deg) of the soft center on the P term (see soft_p). Fixed, not a
+// live tunable; 0 would restore the plain linear P.
+constexpr float kSoftCenterDeg = 5.0f;
 
 constexpr float kMaxKp = 20.0f;
 constexpr float kMaxKd = 5.0f;
@@ -127,11 +131,20 @@ inline float stick_norm(const Config& c, float stick_offset_us) {
     return stick_offset_us < 0.0f ? -n : n;
 }
 
+// Soft-center P term: kp * e * |e| / (|e| + s). The effective gain ramps from
+// ~0 at zero error (kp*e^2/s for |e| << s, so small errors barely move the
+// surfaces) to kp at large error (-> kp*e for |e| >> s), so full authority is
+// kept. At |e| == s the gain is kp/2. Odd and continuous; slope 0 at e = 0.
+inline float soft_p(float kp, float err_deg) {
+    float mag = err_deg < 0.0f ? -err_deg : err_deg;
+    return kp * err_deg * mag / (mag + kSoftCenterDeg);
+}
+
 inline float track(const Config& c, float stick_offset_us, float angle_deg, float rate_dps,
                    float max_angle_deg, float sign, float kp, float kd, float trim_deg) {
     // Trim is a real angle (not scaled by sign) added to the stick's request.
     float request_deg = sign * stick_norm(c, stick_offset_us) * max_angle_deg + trim_deg;
-    float out = -sign * (kp * (angle_deg - request_deg) + kd * rate_dps);
+    float out = -sign * (soft_p(kp, angle_deg - request_deg) + kd * rate_dps);
     if (out > c.max_output_us) return c.max_output_us;
     if (out < -c.max_output_us) return -c.max_output_us;
     return out;
@@ -142,7 +155,7 @@ inline float track(const Config& c, float stick_offset_us, float angle_deg, floa
 // output limit as track(); the request is clamped to max_roll_deg.
 inline float roll_angle(const Config& c, float request_deg, float roll_deg, float roll_rate_dps) {
     request_deg = clamp_range(request_deg, -c.max_roll_deg, c.max_roll_deg);
-    float out = -c.roll_sign * (c.roll_kp * (roll_deg - request_deg) + c.roll_kd * roll_rate_dps);
+    float out = -c.roll_sign * (soft_p(c.roll_kp, roll_deg - request_deg) + c.roll_kd * roll_rate_dps);
     if (out > c.max_output_us) return c.max_output_us;
     if (out < -c.max_output_us) return -c.max_output_us;
     return out;
