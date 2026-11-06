@@ -279,6 +279,10 @@ def telemetry_msg(f, last_seq):
     }
 
 
+# Wireless: a frame older than this (5 Hz push = 0.2 s period) is a real stall.
+WIRELESS_STALE_S = 1.0
+
+
 def wireless_poll_loop(hub, connect, describe, hz, ctl):
     """Wireless variant of poll_loop: consumes the telemetry stream the
     firmware pushes on USART2 (see firmware/src/bt.cpp) and hands the live
@@ -315,6 +319,11 @@ def wireless_poll_loop(hub, connect, describe, hz, ctl):
                     continue
                 msg = telemetry_msg(t, last_seq)
                 last_seq = msg["seq"]
+                # The page polls faster than the firmware pushes (~10 Hz vs
+                # ~5 Hz over the 9600-baud bridge), so "same seq as last
+                # poll" is normal here, not a stall. Stale = no new frame
+                # for several push periods.
+                msg["stale"] = age > WIRELESS_STALE_S
                 hub.publish(msg)
                 time.sleep(1.0 / hz)
         except Exception as e:
