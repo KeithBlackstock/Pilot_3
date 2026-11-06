@@ -1,10 +1,16 @@
-"""Flight-controller control for the dashboard: live leveler config over
-OpenOCD, "save as firmware defaults", and compile + flash.
+"""Flight-controller control for the dashboard: live leveler config,
+"save as firmware defaults", and compile + flash.
 
 Config lives in the firmware's `g_attitude_config` (RAM, see
 firmware/src/attitude_level.hpp). Its address is looked up by symbol name in
 the built ELF, so it stays correct when the layout changes. Live writes are
 volatile: a reset restores the firmware's compiled-in defaults.
+
+Everything except flash() is transport-agnostic: the functions take any link
+with read_words(addr, n)/write_word(addr, word) -- OcdLink (OpenOCD telnet,
+in this file), pilot3_ble_link.BleLink (CC41-A BLE) or
+pilot3_serial_link.SerialLink (legacy Bluetooth SPP). flash()
+needs OpenOCD by definition.
 """
 import re
 import socket
@@ -100,7 +106,7 @@ class OcdLink:
             self._sock = None
             raise ControlError(
                 f"OpenOCD telnet unreachable at {self.host}:{self.port} -- "
-                "start it with pilot3_dashboard.bat")
+                "start it with pilot3.bat")
         self._read_until_prompt(2.0)
 
     def _read_until_prompt(self, timeout):
@@ -143,42 +149,25 @@ class OcdLink:
                 self._sock = None
                 raise
 
-    # ---- config ----
+    # ---- word-level primitives ----
+    # Same contract as pilot3_serial_link.SerialLink: every config function
+    # below is written against these two, so it runs identically over SWD
+    # (OpenOCD) or the Bluetooth serial link. flash() is the only method
+    # that genuinely needs OpenOCD.
 
-    def read_config(self):
-        addr = config_address()
-        out = self.command(f"mdw 0x{addr:08x} {len(FIELDS)}")
+    def read_words(self, addr, n):
+        """Read n 32-bit words at addr via mdw."""
+        out = self.command(f"mdw 0x{addr:08x} {n}")
         words = []
         for line in LINE_RE.findall(out):
             words += [int(w, 16) for w in line.split()]
-        if len(words) < len(FIELDS):
+        if len(words) < n:
             raise ControlError(f"mdw returned {len(words)} words: {out.strip()!r}")
-        vals = struct.unpack(f"<{len(FIELDS)}f", struct.pack(f"<{len(FIELDS)}I", *words[:len(FIELDS)]))
-        return {n: round(v, 6) for n, v in zip(FIELDS, vals)}
+        return words[:n]
 
-    def write_config(self, values):
-        values = validate(values)
-        addr = config_address()
-        for i, name in enumerate(FIELDS):
-            word = struct.unpack("<I", struct.pack("<f", values[name]))[0]
-            self.command(f"mww 0x{addr + 4 * i:08x} 0x{word:08x}")
-        back = self.read_config()
-        for name in FIELDS:
-            if abs(back[name] - values[name]) > 1e-4:
-                raise ControlError(f"{name} read back {back[name]} (wrote {values[name]})")
-        return back
-
-    def write_baro_ref(self, pressure_pa):
-        """Set the firmware's ground-zero pressure (Pa); altitude reads 0 m at it."""
-        if not (30000.0 <= pressure_pa <= 110000.0):
-            raise ControlError(f"baro reference {pressure_pa:.0f} Pa outside [30000, 110000]")
-        addr = symbol_address("g_baro_ref_pa")
-        word = struct.unpack("<I", struct.pack("<f", pressure_pa))[0]
+    def write_word(self, addr, word):
+        """Write one 32-bit word via mww."""
         self.command(f"mww 0x{addr:08x} 0x{word:08x}")
-        out = self.command(f"mdw 0x{addr:08x} 1")
-        words = [int(w, 16) for line in LINE_RE.findall(out) for w in line.split()]
-        if not words or words[0] != word:
-            raise ControlError(f"baro reference read back {out.strip()!r}")
 
     def flash(self):
         elf = str(ELF).replace("\\", "/")  # OpenOCD runs Tcl: backslashes corrupt
@@ -186,6 +175,44 @@ class OcdLink:
         if "Verified OK" not in out:
             raise ControlError("flash did not verify:\n" + out.strip()[-600:])
         return out
+
+
+# ---- config (transport-agnostic) ----
+# These take the link explicitly (OcdLink or pilot3_serial_link.SerialLink --
+# anything with read_words/write_word), like the mag-cal functions below.
+
+def read_config(link):
+    """Read g_attitude_config as a {field: float} dict."""
+    addr = config_address()
+    vals = struct.unpack(f"<{len(FIELDS)}f",
+                         struct.pack(f"<{len(FIELDS)}I", *link.read_words(addr, len(FIELDS))))
+    return {n: round(v, 6) for n, v in zip(FIELDS, vals)}
+
+
+def write_config(link, values):
+    """Write the leveler config and verify the readback. Returns the values
+    as actually read back."""
+    values = validate(values)
+    addr = config_address()
+    for i, name in enumerate(FIELDS):
+        word = struct.unpack("<I", struct.pack("<f", values[name]))[0]
+        link.write_word(addr + 4 * i, word)
+    back = read_config(link)
+    for name in FIELDS:
+        if abs(back[name] - values[name]) > 1e-4:
+            raise ControlError(f"{name} read back {back[name]} (wrote {values[name]})")
+    return back
+
+
+def write_baro_ref(link, pressure_pa):
+    """Set the firmware's ground-zero pressure (Pa); altitude reads 0 m at it."""
+    if not (30000.0 <= pressure_pa <= 110000.0):
+        raise ControlError(f"baro reference {pressure_pa:.0f} Pa outside [30000, 110000]")
+    addr = symbol_address("g_baro_ref_pa")
+    word = struct.unpack("<I", struct.pack("<f", pressure_pa))[0]
+    link.write_word(addr, word)
+    if link.read_words(addr, 1)[0] != word:
+        raise ControlError("baro reference read back wrong")
 
 
 def save_defaults(values):
@@ -240,12 +267,7 @@ def read_waypoints(link):
     (lat_e7, lon_e7) int32 pairs."""
     addr = symbol_address("g_path_config")
     n_words = 4 + 2 * 16  # header + kMaxWaypoints pairs
-    out = link.command(f"mdw 0x{addr:08x} {n_words}")
-    words = []
-    for line in LINE_RE.findall(out):
-        words += [int(w, 16) for w in line.split()]
-    if len(words) < n_words:
-        raise ControlError(f"mdw returned {len(words)} words: {out.strip()!r}")
+    words = link.read_words(addr, n_words)
     count = min(words[0], 16)
     ints = struct.unpack(f"<{2 * 16}i", struct.pack(f"<{2 * 16}I", *words[4:]))
     return [[ints[2 * i] / 1e7, ints[2 * i + 1] / 1e7] for i in range(count)]
@@ -317,14 +339,9 @@ def validate_mag_cal(values):
 
 def read_mag_cal(link):
     addr = symbol_address("g_mag_cal")
-    out = link.command(f"mdw 0x{addr:08x} {len(MAG_CAL_FIELDS)}")
-    words = []
-    for line in LINE_RE.findall(out):
-        words += [int(w, 16) for w in line.split()]
-    if len(words) < len(MAG_CAL_FIELDS):
-        raise ControlError(f"mdw returned {len(words)} words: {out.strip()!r}")
+    words = link.read_words(addr, len(MAG_CAL_FIELDS))
     vals = struct.unpack(f"<{len(MAG_CAL_FIELDS)}f",
-                         struct.pack(f"<{len(MAG_CAL_FIELDS)}I", *words[:len(MAG_CAL_FIELDS)]))
+                         struct.pack(f"<{len(MAG_CAL_FIELDS)}I", *words))
     return {n: round(v, 6) for n, v in zip(MAG_CAL_FIELDS, vals)}
 
 
@@ -334,7 +351,7 @@ def write_mag_cal(link, values):
     addr = symbol_address("g_mag_cal")
     for i, name in enumerate(MAG_CAL_FIELDS):
         word = struct.unpack("<I", struct.pack("<f", values[name]))[0]
-        link.command(f"mww 0x{addr + 4 * i:08x} 0x{word:08x}")
+        link.write_word(addr + 4 * i, word)
     back = read_mag_cal(link)
     for name in MAG_CAL_FIELDS:
         if abs(back[name] - values[name]) > 1e-4:
@@ -351,11 +368,9 @@ def write_declination(link, deg):
         raise ControlError(f"declination {deg} outside [-90, 90]")
     addr = symbol_address("g_path_config") + PATH_DECL_BYTE_OFFSET
     word = struct.unpack("<I", struct.pack("<f", deg))[0]
-    link.command(f"mww 0x{addr:08x} 0x{word:08x}")
-    out = link.command(f"mdw 0x{addr:08x} 1")
-    words = [int(w, 16) for line in LINE_RE.findall(out) for w in line.split()]
-    if not words or words[0] != word:
-        raise ControlError(f"declination read back {out.strip()!r}")
+    link.write_word(addr, word)
+    if link.read_words(addr, 1)[0] != word:
+        raise ControlError("declination read back wrong")
 
 
 def compute_six_pose_cal(poses):

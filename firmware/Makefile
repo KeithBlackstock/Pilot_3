@@ -18,7 +18,7 @@ ASFLAGS  = $(MCU_FLAGS)
 LDFLAGS  = $(MCU_FLAGS) -Tlinker/gd32f303cc.ld -nostartfiles \
            -Wl,--gc-sections -lm -Wl,-Map=$(BUILD_DIR)/$(TARGET).map
 
-SRC_CPP = src/main.cpp src/spi2.cpp src/icm42688.cpp src/i2c1.cpp src/bmp280.cpp src/qmc5883.cpp src/ibus.cpp src/servo_pwm.cpp src/gps.cpp
+SRC_CPP = src/main.cpp src/spi2.cpp src/icm42688.cpp src/i2c1.cpp src/bmp280.cpp src/qmc5883.cpp src/ibus.cpp src/servo_pwm.cpp src/gps.cpp src/bt.cpp
 OBJS    = $(patsubst src/%.cpp,$(BUILD_DIR)/%.o,$(SRC_CPP)) \
           $(BUILD_DIR)/startup_gd32f303.o
 

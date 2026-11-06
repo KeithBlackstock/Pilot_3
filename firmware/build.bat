@@ -39,10 +39,12 @@ if errorlevel 1 goto :fail
 if errorlevel 1 goto :fail
 "%CXX%" %CXXFLAGS% -c src\gps.cpp       -o build\gps.o
 if errorlevel 1 goto :fail
+"%CXX%" %CXXFLAGS% -c src\bt.cpp        -o build\bt.o
+if errorlevel 1 goto :fail
 
 echo Linking...
 "%CXX%" %MCU_FLAGS% -Tlinker\gd32f303cc.ld -nostartfiles -Wl,--gc-sections -lm -Wl,-Map=build\pilot3_fw.map ^
-    build\startup_gd32f303.o build\main.o build\spi2.o build\icm42688.o build\i2c1.o build\bmp280.o build\qmc5883.o build\ibus.o build\servo_pwm.o build\gps.o -o build\pilot3_fw.elf
+    build\startup_gd32f303.o build\main.o build\spi2.o build\icm42688.o build\i2c1.o build\bmp280.o build\qmc5883.o build\ibus.o build\servo_pwm.o build\gps.o build\bt.o -o build\pilot3_fw.elf
 if errorlevel 1 goto :fail
 
 "%OBJCOPY%" -O binary build\pilot3_fw.elf build\pilot3_fw.bin

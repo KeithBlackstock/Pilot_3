@@ -1,21 +1,38 @@
 #!/usr/bin/env python3
-"""Pilot_3 web dashboard -- a browser presentation of the same Telemetry
-struct tools/pilot3_attitude_monitor.py prints to the terminal.
+"""Pilot_3 web dashboard -- a browser presentation of the Telemetry struct
+the firmware publishes.
 
-Data path is unchanged: poll the fixed SRAM struct over OpenOCD telnet
-(`mdw`, see pilot3_attitude_monitor.py). This script only changes
-presentation -- it serves tools/dashboard.html over HTTP and pushes JSON
-snapshots to the page over a WebSocket:
+Three transports, selected by --ble / --serial:
+
+    default      poll the fixed SRAM struct over OpenOCD telnet (`mdw`, see
+                 pilot3_attitude_monitor.py). Requires the ST-Link attached.
+    --ble        wireless (the supported module): consume the framed
+                 telemetry stream the firmware pushes on USART2
+                 (firmware/src/bt.cpp) through a CC41-A BLE clone's GATT
+                 serial characteristic (pilot3_ble_link.py, bleak).
+                 Dashboard commands ride the same link.
+    --serial     wireless (legacy SPP): same framed stream through a
+                 classic ZS-040 / HC-05 module's COM port
+                 (pilot3_serial_link.py). The module actually in use is a
+                 BLE-only clone, so this mode is for a swapped-in classic
+                 module.
+    In both wireless modes only Compile & Flash still spawns OpenOCD on
+    demand (no wireless flashing).
+
+Either way the presentation is identical -- this script serves
+tools/dashboard.html over HTTP and pushes JSON snapshots to the page over a
+WebSocket:
 
     HTTP  http://127.0.0.1:8080/   -> dashboard.html
     WS    ws://127.0.0.1:8081/     -> telemetry JSON, ~--rate times/second
 
-Requires the firmware already flashed and running. OpenOCD is adopted if an
-instance is already answering on the telnet port (pilot3_dashboard.bat starts
-one); otherwise the dashboard spawns its own. If the telnet link stays dead
-for RESTART_AFTER_S, the wedged OpenOCD session is killed and respawned
-automatically (--no-ocd-restart disables that). On exit, the dashboard kills
-only an instance it spawned -- someone else's OpenOCD is left alone.
+Requires the firmware already flashed and running. In OpenOCD mode an
+instance is adopted if one is already answering on the telnet port
+(pilot3.bat starts one); otherwise the dashboard spawns its own.
+If the telnet link stays dead for RESTART_AFTER_S, the wedged OpenOCD
+session is killed and respawned automatically (--no-ocd-restart disables
+that). On exit, the dashboard kills only an instance it spawned -- someone
+else's OpenOCD is left alone.
 """
 import argparse
 import json
@@ -34,10 +51,20 @@ import pilot3_fc_control as fc
 from pilot3_attitude_monitor import NUM_CHANNELS, read_telemetry
 from pilot3_swd_probe import Ocd
 
+try:
+    import pilot3_serial_link as sl
+except ImportError:  # pyserial missing -- only --serial mode needs it
+    sl = None
+
+try:
+    import pilot3_ble_link as bl
+except ImportError:  # bleak is guarded inside the module; guard anyway
+    bl = None
+
 PAGE_PATH = Path(__file__).resolve().parent / "dashboard.html"
 
 # OpenOCD supervision (see module docstring). Same binary and args as
-# pilot3_dashboard.bat.
+# pilot3.bat.
 OPENOCD_EXE = Path(r"C:\Users\goats\AppData\Local\Microsoft\WinGet\Packages\xpack-dev-tools.openocd-xpack_Microsoft.Winget.Source_8wekyb3d8bbwe\xpack-openocd-0.12.0-7\bin\openocd.exe")
 OPENOCD_ARGS = ["-f", "interface/stlink.cfg", "-f", "target/stm32f3x.cfg", "-c", "adapter speed 950"]
 RESTART_AFTER_S = 8.0  # link dead this long -> kill & respawn OpenOCD
@@ -211,48 +238,136 @@ def poll_loop(hub, host, port, hz, ctl, ocd_server):
             note_dead("OpenOCD link dropped")
             continue
         dead_since = None
-        (seq, roll_deg, pitch_deg, baro_temp_c, baro_pressure_pa, baro_altitude_m,
-         ibus_rx_bytes, ibus_frames_ok, ibus_frames_bad) = f[:9]
-        ch = list(f[9:9 + NUM_CHANNELS])
-        pwm_s1_us, pwm_s4_us = f[9 + NUM_CHANNELS:9 + NUM_CHANNELS + 2]
-        hub.publish({
-            "connected": True,
-            "stale": seq == last_seq,
-            "seq": seq,
-            "roll_deg": roll_deg,
-            "pitch_deg": pitch_deg,
-            "baro_temp_c": baro_temp_c,
-            "baro_pressure_pa": baro_pressure_pa,
-            "baro_altitude_m": baro_altitude_m,
-            "ibus_rx_bytes": ibus_rx_bytes,
-            "ibus_frames_ok": ibus_frames_ok,
-            "ibus_frames_bad": ibus_frames_bad,
-            "ibus_ch": ch,
-            "pwm_s1_us": pwm_s1_us,
-            "pwm_s4_us": pwm_s4_us,
-            "gps": {**dict(zip(("lat_e7", "lon_e7", "alt_m", "speed_mps", "course_deg",
-                                "rx_bytes", "sentences_ok", "sentences_bad", "sats", "fix"),
-                               f[9 + NUM_CHANNELS + 2:9 + NUM_CHANNELS + 2 + 10])),
-                    "lat_deg": f[9 + NUM_CHANNELS + 2] / 1e7,
-                    "lon_deg": f[9 + NUM_CHANNELS + 3] / 1e7},
-            "mag": dict(zip(("x", "y", "z", "present", "heading_deg", "reads_ok", "errors"),
-                            f[9 + NUM_CHANNELS + 2 + 10:9 + NUM_CHANNELS + 2 + 16])),
-        })
-        last_seq = seq
+        hub.publish(telemetry_msg(f, last_seq))
+        last_seq = f[0]
         time.sleep(1.0 / hz)
+
+
+def telemetry_msg(f, last_seq):
+    """Build the dashboard JSON from a decoded Telemetry tuple (the struct
+    layout from pilot3_attitude_monitor.STRUCT_FMT). Shared by the OpenOCD
+    poll loop and the Bluetooth serial consumer so the page sees an
+    identical shape on either transport."""
+    (seq, roll_deg, pitch_deg, baro_temp_c, baro_pressure_pa, baro_altitude_m,
+     ibus_rx_bytes, ibus_frames_ok, ibus_frames_bad) = f[:9]
+    ch = list(f[9:9 + NUM_CHANNELS])
+    pwm_s1_us, pwm_s4_us = f[9 + NUM_CHANNELS:9 + NUM_CHANNELS + 2]
+    return {
+        "connected": True,
+        "stale": seq == last_seq,
+        "seq": seq,
+        "roll_deg": roll_deg,
+        "pitch_deg": pitch_deg,
+        "baro_temp_c": baro_temp_c,
+        "baro_pressure_pa": baro_pressure_pa,
+        "baro_altitude_m": baro_altitude_m,
+        "ibus_rx_bytes": ibus_rx_bytes,
+        "ibus_frames_ok": ibus_frames_ok,
+        "ibus_frames_bad": ibus_frames_bad,
+        "ibus_ch": ch,
+        "pwm_s1_us": pwm_s1_us,
+        "pwm_s4_us": pwm_s4_us,
+        "gps": {**dict(zip(("lat_e7", "lon_e7", "alt_m", "speed_mps", "course_deg",
+                            "rx_bytes", "sentences_ok", "sentences_bad", "sats", "fix"),
+                           f[9 + NUM_CHANNELS + 2:9 + NUM_CHANNELS + 2 + 10])),
+                "lat_deg": f[9 + NUM_CHANNELS + 2] / 1e7,
+                "lon_deg": f[9 + NUM_CHANNELS + 3] / 1e7},
+        # Mag group is 7 fields (4h f 2I): +17, not +16 -- the old poll_loop
+        # sliced one short and the page's mag "err" readout was undefined.
+        "mag": dict(zip(("x", "y", "z", "present", "heading_deg", "reads_ok", "errors"),
+                        f[9 + NUM_CHANNELS + 2 + 10:9 + NUM_CHANNELS + 2 + 17])),
+    }
+
+
+def wireless_poll_loop(hub, connect, describe, hz, ctl):
+    """Wireless variant of poll_loop: consumes the telemetry stream the
+    firmware pushes on USART2 (see firmware/src/bt.cpp) and hands the live
+    link to the Controller so dashboard commands ride the same transport.
+    connect() builds the link -- a SerialLink (SPP COM port) or a BleLink
+    (CC41-A BLE clone); describe names the transport for error messages.
+    Reconnects forever on failure, mirroring the OpenOCD loop."""
+    last_seq = None
+    while True:
+        if ctl.busy.is_set():
+            time.sleep(0.2)
+            continue
+        try:
+            link = connect()
+        except Exception as e:
+            hub.publish({"connected": False, "error": f"cannot connect to {describe}: {e}"})
+            time.sleep(2.0)
+            continue
+        ctl.link = link  # config commands ride the live link (None when down)
+        try:
+            while True:
+                if ctl.busy.is_set():
+                    time.sleep(0.2)
+                    continue
+                if link.error:
+                    raise RuntimeError(link.error)
+                t, age = link.latest_telemetry()
+                if t is None or age > 2.0:
+                    hub.publish({"connected": False,
+                                 "error": f"no telemetry from the FC on {describe} -- "
+                                          "is the FC powered with the BT firmware, and "
+                                          "the module on USART2?"})
+                    time.sleep(0.5)
+                    continue
+                msg = telemetry_msg(t, last_seq)
+                last_seq = msg["seq"]
+                hub.publish(msg)
+                time.sleep(1.0 / hz)
+        except Exception as e:
+            hub.publish({"connected": False, "error": str(e)})
+        finally:
+            ctl.link = None
+            link.close()
+            time.sleep(1.0)
 
 
 class Controller:
     """Handles browser commands: leveler config and compile + flash. One
-    background job at a time; telemetry polling pauses while it runs."""
+    background job at a time; telemetry polling pauses while it runs.
 
-    def __init__(self, hub, host, port):
+    Config commands run on self.link, which is an OcdLink (SWD mode) or the
+    live wireless link (a pilot3_serial_link.SerialLink or
+    pilot3_ble_link.BleLink, set/cleared by wireless_poll_loop, None while
+    the link is down) -- all implement read_words/write_word, so the fc.*
+    control functions work on any of them. Flashing always goes through
+    OpenOCD (no wireless flashing)."""
+
+    def __init__(self, hub, host, port, ocd_server=None, wireless_mode=False):
         self.hub = hub
-        self.link = fc.OcdLink(host, port)
+        self.wireless_mode = wireless_mode
+        self._host, self._port = host, port
+        self._ocd_server = ocd_server
+        self._flash_link = None
+        self.link = None if wireless_mode else fc.OcdLink(host, port)
         self.busy = threading.Event()
         self._job_lock = threading.Lock()
         self.live = None  # last values applied from the dashboard this session
         self.cal_poses = []  # compass ritual: averaged raw poses captured so far
+
+    def _require_link(self):
+        if self.link is None:
+            raise fc.ControlError(
+                "no live link to the FC yet -- waiting for Bluetooth telemetry")
+        return self.link
+
+    def _get_flash_link(self):
+        """OpenOCD link for flashing. In wireless mode OpenOCD is not
+        supervised, so it is spawned on demand -- the ST-Link must be
+        attached for Compile & Flash to work."""
+        if not self.wireless_mode:
+            return self.link
+        srv = self._ocd_server
+        if srv is not None and not srv._port_up(0.3):
+            if not srv.restart() or not srv._port_up(6.0):
+                raise fc.ControlError(
+                    "flashing needs the ST-Link attached: OpenOCD did not come up")
+        if self._flash_link is None:
+            self._flash_link = fc.OcdLink(self._host, self._port)
+        return self._flash_link
 
     def _job(self, state, log=""):
         self.hub.broadcast({"type": "job", "state": state, "log": log})
@@ -266,7 +381,7 @@ class Controller:
         failure only notes itself on the map card -- the config reload that
         triggered this has already succeeded."""
         try:
-            points = fc.read_waypoints(self.link)
+            points = fc.read_waypoints(self._require_link())
         except (fc.ControlError, OSError) as e:
             self.hub.broadcast({"type": "waypoints", "points": None,
                                 "note": f"Could not read the route: {e}"}, sticky=False)
@@ -280,10 +395,10 @@ class Controller:
         cmd = msg.get("cmd")
         try:
             if cmd == "get_config":
-                self._config(self.link.read_config(), "read from FC")
+                self._config(fc.read_config(self._require_link()), "read from FC")
                 self._send_waypoints()
             elif cmd == "set_config":
-                values = self.link.write_config(msg.get("values", {}))
+                values = fc.write_config(self._require_link(), msg.get("values", {}))
                 self.live = values
                 self._config(values, "applied live (lost on reset unless saved)")
             elif cmd == "save_defaults":
@@ -302,8 +417,8 @@ class Controller:
                 self.cal_poses.clear()
                 self._mag_cal(True, "Calibration aborted.", poses=0)
             elif cmd == "mag_cal_apply":
-                values = fc.write_mag_cal(self.link, msg.get("values", {}))
-                fc.write_declination(self.link, msg.get("heading_offset", 0.0))
+                values = fc.write_mag_cal(self._require_link(), msg.get("values", {}))
+                fc.write_declination(self._require_link(), msg.get("heading_offset", 0.0))
                 self._mag_cal(True, "applied live (lost on reset unless saved)", values,
                               msg.get("heading_offset"))
             elif cmd == "mag_cal_save":
@@ -388,7 +503,7 @@ class Controller:
             return
         ref = sum(samples) / len(samples)
         try:
-            self.link.write_baro_ref(ref)
+            fc.write_baro_ref(self._require_link(), ref)
         except (fc.ControlError, OSError) as e:
             self._baro_cal(False, f"Altitude calibration failed: {e}")
             return
@@ -418,7 +533,7 @@ class Controller:
                 return
             self._job("flashing", log[-600:])
             try:
-                self.link.flash()
+                self._get_flash_link().flash()
             except (fc.ControlError, OSError) as e:
                 self._job("error", f"FLASH FAILED: {e}")
                 return
@@ -429,9 +544,9 @@ class Controller:
                     # Flash restored the compiled-in defaults; put back whatever
                     # the dashboard had applied so a re-flash doesn't silently
                     # revert tuning in progress.
-                    self.link.write_config(self.live)
+                    fc.write_config(self._require_link(), self.live)
                     note = " Live-applied values were re-applied."
-                self._config(self.link.read_config(), "read from FC after flash")
+                self._config(fc.read_config(self._require_link()), "read from FC after flash")
             except (fc.ControlError, OSError) as e:
                 note = f" (could not read config back: {e})"
             self._job("done", "Build OK, flashed and verified." + note)
@@ -495,6 +610,14 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--host", default="localhost", help="OpenOCD telnet host")
     ap.add_argument("--port", type=int, default=4444, help="OpenOCD telnet port")
+    ap.add_argument("--ble", metavar="NAME|ADDR", nargs="?", const="Pilot3",
+                    help="BLE dashboard via the CC41-A clone on USART2 -- connect by "
+                         "device name (default 'Pilot3') or MAC address; OpenOCD is "
+                         "then only used on demand by Compile & Flash")
+    ap.add_argument("--serial", metavar="COMx",
+                    help="legacy classic-SPP COM port (ZS-040 / HC-05 on USART2) -- "
+                         "same wireless dashboard over a swapped-in classic module")
+    ap.add_argument("--baud", type=int, default=115200, help="--serial baud rate")
     ap.add_argument("--rate", type=float, default=10.0, help="telemetry polls per second")
     ap.add_argument("--http-port", type=int, default=8080)
     ap.add_argument("--ws-port", type=int, default=8081)
@@ -503,25 +626,57 @@ def main():
                     help="never kill/respawn OpenOCD; just report link loss")
     args = ap.parse_args()
 
+    ble_mode = args.ble is not None
+    serial_mode = args.serial is not None
+    if ble_mode and serial_mode:
+        print("--ble and --serial are alternatives; pick one")
+        return 2
+    if ble_mode and (bl is None or bl.BleakClient is None):
+        print("--ble needs bleak (pip install --user bleak)")
+        return 2
+    if serial_mode and (sl is None or sl.serial is None):
+        print("--serial needs pyserial (pip install pyserial)")
+        return 2
+    wireless_mode = ble_mode or serial_mode
+
     hub = Hub()
-    ctl = Controller(hub, args.host, args.port)
-
     ocd_server = OcdServer(args.host, args.port, auto=not args.no_ocd_restart)
-    how = ocd_server.ensure_up()
-    if how == "adopted":
-        print(f"OpenOCD already running on {args.host}:{args.port} -- adopted.")
-    elif how == "started":
-        print("OpenOCD was not running -- started a supervised instance.")
-    else:
-        print(f"OpenOCD unreachable on {args.host}:{args.port} -- will keep retrying in the background.")
+    ctl = Controller(hub, args.host, args.port, ocd_server=ocd_server,
+                     wireless_mode=wireless_mode)
 
-    threading.Thread(target=poll_loop, args=(hub, args.host, args.port, args.rate, ctl, ocd_server), daemon=True).start()
+    if wireless_mode:
+        # Wireless: no OpenOCD supervision. The Bluetooth link is the
+        # transport; OpenOCD is spawned on demand only if Compile & Flash
+        # is clicked (which needs the ST-Link attached).
+        if ble_mode:
+            target = args.ble
+            connect = lambda: bl.BleLink(target)  # noqa: E731
+            describe = f"BLE '{target}'"
+            transport = f"BLE {target} (CC41-A @ 9600)"
+        else:
+            port, baud = args.serial, args.baud
+            connect = lambda: sl.SerialLink(port, baud)  # noqa: E731
+            describe = f"COM port {port}"
+            transport = f"Bluetooth SPP {port} @ {baud}"
+        threading.Thread(target=wireless_poll_loop,
+                         args=(hub, connect, describe, args.rate, ctl),
+                         daemon=True).start()
+    else:
+        how = ocd_server.ensure_up()
+        if how == "adopted":
+            print(f"OpenOCD already running on {args.host}:{args.port} -- adopted.")
+        elif how == "started":
+            print("OpenOCD was not running -- started a supervised instance.")
+        else:
+            print(f"OpenOCD unreachable on {args.host}:{args.port} -- will keep retrying in the background.")
+        threading.Thread(target=poll_loop, args=(hub, args.host, args.port, args.rate, ctl, ocd_server), daemon=True).start()
+        transport = f"OpenOCD {args.host}:{args.port}"
 
     ws_server = serve(lambda conn: ws_handler(hub, ctl, args.http_port, conn), "127.0.0.1", args.ws_port)
     threading.Thread(target=ws_server.serve_forever, daemon=True).start()
 
     url = f"http://127.0.0.1:{args.http_port}/"
-    print(f"Dashboard: {url}  (WebSocket on :{args.ws_port}, polling OpenOCD {args.host}:{args.port})")
+    print(f"Dashboard: {url}  (WebSocket on :{args.ws_port}, transport: {transport})")
     if not args.no_open:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
 

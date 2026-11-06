@@ -10,6 +10,7 @@ Bare-metal C++ firmware (no HAL) for a "blue pill"-style flight-controller board
 - Baro: BMP280 on I2C1
 - RC input: FlySky iBus on USART3
 - GPS: u-blox M10, UBX-NAV-PVT on USART1
+- Bluetooth: CC41-A (BLE-only HM-10 clone) on USART2, 9600 8N1 -- wireless dashboard (below)
 - Outputs: TIM2/TIM3 PWM, 50 Hz, 1000-2000 us
   - PWM_S1 (PA6, TIM3_CH1) and PWM_S4 (PA1, TIM2_CH2): ruddervator servos
   - PWM_S2 (PA7, TIM3_CH2): brushless ESC
@@ -61,13 +62,23 @@ In this 3CH scheme there are no ailerons, so rudder (yaw) input is what induces 
 
 ## Dashboard and configurator
 
-`pilot3_dashboard.bat` starts OpenOCD and a browser dashboard (`tools/`) with live telemetry plus:
+`pilot3.bat` (prompts for the link: 1 = SWD, 2 = BLE) starts OpenOCD and a browser dashboard (`tools/`) with live telemetry plus:
 
 - **Attitude leveler card:** shows whether the angle loop is on, and edits the gains (Kp, Kd), directions, max pitch/roll angles, deadband and authority limit. "Apply live" writes the values into the running FC's RAM over SWD (range-checked in the dashboard and again in the firmware; lost on reset). "Save as firmware defaults" rewrites `kDefaults` in `attitude_level.hpp` so the next build boots with them.
 - **Compile & Flash:** runs `firmware/build.bat`, flashes the ELF through the running OpenOCD (verify + reset), then re-applies any live values and reads the config back. Telemetry pauses while it runs. It resets the board, so remove the prop first.
 - **Waypoint planner:** an OpenStreetMap map (Leaflet, needs internet) for placing, dragging and deleting up to 16 waypoints, with leg distances and the live aircraft position and course. Compile & Flash bakes the route into a generated `firmware/src/waypoints.hpp`, so the flashed firmware boots with the route loaded (see PATH above).
 
 The dashboard's WebSocket only accepts connections from the dashboard page itself (Origin check), since it can flash the board.
+
+### Bluetooth (wireless) dashboard
+
+A CC41-A module (a BLE-only HM-10 clone, sold as "ZS-040") on the UART2 connector (module RX <- PA2, module TX -> PA3, 3.3 V logic) carries the same dashboard over the air -- no ST-Link, no pairing, no COM port. Choose option 2 in `pilot3.bat`. Everything works wirelessly except Compile & Flash, which spawns OpenOCD on demand and still needs the ST-Link attached at that moment.
+
+- **Module identity:** the board-marked ZS-040 turned out to be a CC41-A (CC2541, Bluetooth 4.0 LE only -- `AT+VERSION?` reports "Firmware V3.0.6, Bluetooth V4.0 LE"). There is no classic SPP/RFCOMM in it, so the original COM-port plan was impossible; the dashboard talks BLE GATT instead via `tools/pilot3_ble_link.py` (needs `pip install --user bleak`). Serial service is `0xDFB0` with one characteristic `0xDFB1` (read/notify/write). The module advertises as "Pilot3" (address `00:15:87:10:9E:53`); Windows discovery often doesn't surface the name for this clone, so the launcher connects by address.
+- **9600 baud, 5 Hz:** the clone's UART bridge is hard-locked to 9600 baud -- it accepts `AT+BAUD4` and replies `+BAUD=4`, but the bridge never actually leaves 9600, and its AT interface is flaky (garbage replies at every baud; verified extensively over a SWD register bridge). So the firmware runs USART2 at 9600 8N1 and pushes telemetry at ~5 Hz: a frame is ~130 bytes (135 ms on the wire), and 5 Hz uses ~68% of the line. This is a module limitation, not a design choice -- a genuine HM-10 (or a classic HC-05, using the dashboard's `--serial` mode) would allow 115200 and 10 Hz again with a one-line BRR change in `bt.cpp`.
+- **How it works:** the firmware (`firmware/src/bt.cpp`) pushes the same 124-byte `Telemetry` struct the SWD dashboard polls, as framed packets, and answers peek/poke requests for 32-bit SRAM words -- the exact primitive every dashboard control is built on, so live config, baro zero, compass calibration and waypoint readback all work unchanged. Frames are `A5 5A | type | len | payload | crc16` (CRC16-CCITT); a CRC failure is dropped, never executed, and reads/writes are bounded to SRAM. Notifications arrive in ~20-byte BLE chunks; the host-side `FrameParser` (shared with `tools/pilot3_serial_link.py`, which has a codec self-test: run it directly) reassembles them. Link check: `python tools/pilot3_ble_link.py`.
+- **AT notes (if you ever re-probe it):** AT is answered at 9600 while the module is unconnected; set-args take no `=` (`AT+NAMEPilot3`); `AT+RESET` reboots it. Holding the button at power-up drops this clone into a 38400-baud command mode. While unconnected it interprets the FC's telemetry stream as AT garbage and floods `ERROR` back -- harmless (the firmware just counts them in `g_bt_stats.crc_bad`), and it stops the moment a BLE central connects.
+- **Independence:** the SWD dashboard (option 1 in `pilot3.bat`) is untouched by all of this and works exactly as before.
 
 ## Verified on the bench
 
@@ -89,7 +100,8 @@ Not implemented. Design notes only. (PATH itself -- steering, route logic, pilot
 ## Layout
 
 - `firmware/` - firmware source (`src/`), linker script, startup, `build.bat` (Windows) and `Makefile`
-- `tools/` - OpenOCD-based telemetry monitor and web dashboard
+- `tools/` - OpenOCD-based telemetry monitor, web dashboard, and the Bluetooth links (`pilot3_ble_link.py` for the CC41-A BLE module, `pilot3_serial_link.py` for a classic SPP module)
+- `pilot3.bat` - unified dashboard launcher (prompts: 1 = SWD, 2 = BLE)
 - `circuit_reference/` - board schematic (KiCanvas) and netlist
 - `pilot3_swd_probe.py` - SWD register probe used for initial bring-up
 

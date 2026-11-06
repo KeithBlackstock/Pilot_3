@@ -1,7 +1,8 @@
 /* Cortex-M4 startup for GD32F303CCT6. Core exception vectors (0-15) plus
  * device IRQ vectors 0-39, using the standard STM32F1/GD32F30x IRQ
- * numbering -- needed to reach IRQ39 (USART3). The firmware's two enabled
- * peripheral interrupts are IRQ37 (USART1, see gps.cpp) and IRQ39 (USART3,
+ * numbering -- needed to reach IRQ39 (USART3). The firmware's three enabled
+ * peripheral interrupts are IRQ37 (USART1, see gps.cpp), IRQ38 (USART2,
+ * see bt.cpp) and IRQ39 (USART3,
  * see ibus.cpp). The hardware indexes this
  * table directly by IRQ number, so every slot up to the one we use must
  * be present (Default_Handler) even though nothing else is enabled -- the
@@ -16,6 +17,7 @@
 .global g_pfnVectors
 .global USART3_IRQHandler
 .global USART1_IRQHandler
+.global USART2_IRQHandler
 
 .section .isr_vector, "a", %progbits
 .type g_pfnVectors, %object
@@ -76,7 +78,7 @@ g_pfnVectors:
     .word Default_Handler   /* 35 SPI1 */
     .word Default_Handler   /* 36 SPI2 */
     .word USART1_IRQHandler /* 37 USART1 -- gps.cpp */
-    .word Default_Handler   /* 38 USART2 */
+    .word USART2_IRQHandler /* 38 USART2 -- bt.cpp */
     .word USART3_IRQHandler /* 39 USART3 -- ibus.cpp */
 .size g_pfnVectors, . - g_pfnVectors
 

@@ -3,8 +3,9 @@
 // Reads the ICM-42688-P over SPI2 at a fixed 200 Hz loop rate (SysTick
 // busy-wait, no interrupts, no EXTI/AFIO/GPIOA touched at all -- see
 // regs.hpp), fuses accel+gyro into roll/pitch with a complementary filter,
-// and publishes the result into a fixed SRAM address for
-// tools/pilot3_attitude_monitor.py to poll over OpenOCD telnet.
+// and publishes the result two ways: into a fixed SRAM address for
+// tools/pilot3_attitude_monitor.py to poll over OpenOCD telnet, and as a
+// framed stream on USART2 (bt.cpp) for the wireless Bluetooth dashboard.
 //
 // Assumes post-reset clocks (HSI 8 MHz, PCLK1 = 8 MHz), same as
 // pilot3_swd_probe.py -- no RCC_CFGR changes.
@@ -12,6 +13,7 @@
 
 #include "attitude_level.hpp"
 #include "bmp280.hpp"
+#include "bt.hpp"
 #include "complementary_filter.hpp"
 #include "gps.hpp"
 #include "ibus.hpp"
@@ -99,6 +101,13 @@ constexpr uint32_t kMagStaleLoops = 40;
 // is a frozen lifetime value that PATH must not steer on (cable pulled
 // mid-flight must fall back to plain stabilize).
 constexpr uint32_t kGpsStaleLoops = 100;
+
+// Bluetooth dashboard link (USART2, see bt.cpp): host commands are serviced
+// every tick and a telemetry frame is pushed every Nth iteration (~5 Hz).
+// 5 Hz is what the 9600-baud BLE bridge carries: a frame is ~130 bytes
+// (135 ms on the wire), so 5 Hz uses ~68% of the line; 10 Hz would need
+// 1300 B/s against a 960 B/s ceiling and just overflows the TX ring.
+constexpr uint32_t kBtStreamEveryN = static_cast<uint32_t>(kLoopHz / 5.0f);
 
 // Busy-wait one SysTick period. No TICKINT/NVIC involved -- just polls
 // COUNTFLAG, which is cleared by hardware on read.
@@ -225,6 +234,10 @@ int main() {
     // Same for the GPS on USART1: UBX NAV-PVT frames are assembled in the
     // ISR and decoded later in the main loop via gps::poll().
     gps::init();
+
+    // Bluetooth dashboard link on USART2 (CC41-A BLE clone, 9600 8N1).
+    // RXNE/TXE interrupts only; if the module is absent this is a no-op.
+    bt::init();
 
     // Servos go to neutral immediately and hold there until real channel
     // data starts arriving (see servo_pwm's clamp_or_neutral()).
@@ -454,5 +467,12 @@ int main() {
 
         g_telemetry.seq = g_telemetry.seq + 1;
         loop_count++;
+
+        // Bluetooth dashboard link: execute at most one pending host
+        // command (RD32/WR32) and push a telemetry frame at ~5 Hz. Both
+        // are non-blocking -- a busy TX ring drops frames, it never stalls
+        // the control loop.
+        bt::poll();
+        if (loop_count % kBtStreamEveryN == 0) bt::send_telemetry();
     }
 }

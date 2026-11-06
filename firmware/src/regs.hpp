@@ -30,6 +30,7 @@ constexpr uint32_t RCC_APB2ENR_USART1EN = 1u << 14;
 constexpr uint32_t RCC_APB1ENR_TIM2EN  = 1u << 0;
 constexpr uint32_t RCC_APB1ENR_TIM3EN  = 1u << 1;
 constexpr uint32_t RCC_APB1ENR_SPI2EN  = 1u << 14;
+constexpr uint32_t RCC_APB1ENR_USART2EN = 1u << 17;
 constexpr uint32_t RCC_APB1ENR_USART3EN = 1u << 18;
 constexpr uint32_t RCC_APB1ENR_I2C1EN  = 1u << 21;
 
@@ -126,6 +127,24 @@ constexpr uint32_t USART1_CR1_RE     = 1u << 2;
 constexpr uint32_t USART1_CR1_RXNEIE = 1u << 5;
 constexpr uint32_t USART1_CR1_UE     = 1u << 13;
 
+// ---- USART2 ---- (PA2=TX, Bluetooth dashboard link, see bt.cpp; PA3=RX)
+// USART2 is an APB1 peripheral (same bus as USART3). PA2 needs an AF
+// push-pull nibble in GPIOA_CRL (pins 0-7, far from the PA15 constraint);
+// PA3 (RX) needs no config: floating input is its reset state.
+constexpr uint32_t USART2_BASE = 0x40004400;
+constexpr uint32_t USART2_SR   = USART2_BASE + 0x00;
+constexpr uint32_t USART2_DR   = USART2_BASE + 0x04;
+constexpr uint32_t USART2_BRR  = USART2_BASE + 0x08;
+constexpr uint32_t USART2_CR1  = USART2_BASE + 0x0C;
+
+constexpr uint32_t USART2_SR_RXNE = 1u << 5;
+constexpr uint32_t USART2_SR_TXE  = 1u << 7;
+constexpr uint32_t USART2_CR1_RE     = 1u << 2;
+constexpr uint32_t USART2_CR1_TE     = 1u << 3;
+constexpr uint32_t USART2_CR1_RXNEIE = 1u << 5;
+constexpr uint32_t USART2_CR1_TXEIE  = 1u << 7;
+constexpr uint32_t USART2_CR1_UE     = 1u << 13;
+
 // ---- TIM2 (PWM_S4 / PA1, channel 2) and TIM3 (PWM_S1 / PA6, channel 1) ----
 // Standard STM32F1-family general-purpose timer layout.
 constexpr uint32_t TIM2_BASE = 0x40000000;
@@ -159,9 +178,11 @@ constexpr uint32_t TIM_CCER_CC2E = 1u << 4;
 // USART3 is IRQ39 on this family (standard STM32F1/GD32F30x vector layout);
 // IRQ39 falls in ISER1 (covers IRQ32-63), bit (39-32)=7.
 // USART1 is IRQ37 in the same layout -> ISER1 bit (37-32)=5.
+// USART2 is IRQ38 in the same layout -> ISER1 bit (38-32)=6.
 constexpr uint32_t NVIC_ISER1 = 0xE000E104;
 constexpr uint32_t NVIC_ISER1_USART3 = 1u << 7;
 constexpr uint32_t NVIC_ISER1_USART1 = 1u << 5;
+constexpr uint32_t NVIC_ISER1_USART2 = 1u << 6;
 
 // ---- SysTick (ARMv7-M core peripheral, not vendor-specific) ----
 constexpr uint32_t SYST_CSR = 0xE000E010;
