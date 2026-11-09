@@ -276,6 +276,9 @@ def telemetry_msg(f, last_seq):
         # sliced one short and the page's mag "err" readout was undefined.
         "mag": dict(zip(("x", "y", "z", "present", "heading_deg", "reads_ok", "errors"),
                         f[9 + NUM_CHANNELS + 2 + 10:9 + NUM_CHANNELS + 2 + 17])),
+        # Derived pair appended after the mag group (2 floats, +17/+18).
+        "baro_climb_mps": f[9 + NUM_CHANNELS + 2 + 17],
+        "speed3d_mps": f[9 + NUM_CHANNELS + 2 + 18],
     }
 
 
@@ -355,6 +358,7 @@ class Controller:
         self.busy = threading.Event()
         self._job_lock = threading.Lock()
         self.live = None  # last values applied from the dashboard this session
+        self.cruise_live = None  # same, for the cruise-mode card
         self.cal_poses = []  # compass ritual: averaged raw poses captured so far
 
     def _require_link(self):
@@ -402,6 +406,9 @@ class Controller:
 
     def handle(self, msg):
         cmd = msg.get("cmd")
+        if cmd in ("get_cruise", "set_cruise", "save_cruise"):
+            self._handle_cruise(msg)
+            return
         try:
             if cmd == "get_config":
                 self._config(fc.read_config(self._require_link()), "read from FC")
@@ -447,6 +454,35 @@ class Controller:
 
     def _baro_cal(self, ok, note):
         self.hub.broadcast({"type": "baro_cal", "ok": ok, "note": note}, sticky=False)
+
+    def _cruise(self, values, note="", err=False):
+        self.hub.broadcast({"type": "cruise_config", "values": values,
+                            "note": note, "err": err})
+
+    def _handle_cruise(self, msg):
+        """Cruise-mode card: same live-config pattern as the leveler, but its
+        own message type so its errors land on the cruise card, not the
+        leveler's."""
+        cmd = msg.get("cmd")
+        try:
+            if cmd == "get_cruise":
+                self._cruise(fc.read_cruise_config(self._require_link()), "read from FC")
+            elif cmd == "set_cruise":
+                values = fc.write_cruise_config(self._require_link(), msg.get("values", {}))
+                self.cruise_live = values
+                self._cruise(values, "applied live (lost on reset unless saved)")
+            elif cmd == "save_cruise":
+                values = fc.validate_cruise(msg.get("values", {}))
+                fc.save_cruise_defaults(values)
+                # Same reason as save_defaults: keep the post-flash re-apply
+                # in sync with the new defaults.
+                self.cruise_live = values
+                self._cruise(values,
+                             "saved to cruise_mode.hpp -- takes effect after Compile & Flash")
+        except fc.ControlError as e:
+            self._cruise(None, str(e), err=True)
+        except (OSError, RuntimeError) as e:
+            self._cruise(None, f"OpenOCD: {e}", err=True)
 
     def _mag_cal(self, ok, note, values=None, heading_offset=None, poses=None):
         self.hub.broadcast({"type": "mag_cal", "ok": ok, "note": note, "values": values,
@@ -549,13 +585,18 @@ class Controller:
             time.sleep(1.0)  # let the firmware boot before touching its RAM
             note = ""
             try:
+                # Flash restored the compiled-in defaults; put back whatever
+                # the dashboard had applied so a re-flash doesn't silently
+                # revert tuning in progress.
                 if self.live is not None:
-                    # Flash restored the compiled-in defaults; put back whatever
-                    # the dashboard had applied so a re-flash doesn't silently
-                    # revert tuning in progress.
                     fc.write_config(self._require_link(), self.live)
                     note = " Live-applied values were re-applied."
+                if self.cruise_live is not None:
+                    fc.write_cruise_config(self._require_link(), self.cruise_live)
+                    note = " Live-applied values were re-applied."
                 self._config(fc.read_config(self._require_link()), "read from FC after flash")
+                self._cruise(fc.read_cruise_config(self._require_link()),
+                             "read from FC after flash")
             except (fc.ControlError, OSError) as e:
                 note = f" (could not read config back: {e})"
             self._job("done", "Build OK, flashed and verified." + note)

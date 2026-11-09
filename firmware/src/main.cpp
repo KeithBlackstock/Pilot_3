@@ -15,6 +15,7 @@
 #include "bmp280.hpp"
 #include "bt.hpp"
 #include "complementary_filter.hpp"
+#include "cruise_mode.hpp"
 #include "gps.hpp"
 #include "ibus.hpp"
 #include "icm42688.hpp"
@@ -56,6 +57,13 @@ volatile float g_baro_ref_pa = 0.0f;
 // and copied in at the top of main(); count 0 = no route, PATH disabled.
 volatile path_mode::Config g_path_config = {0, 0.5f, 10.0f, 47.9912f, {}, 100.0f};  // PATH-DEFAULTS-LINE
 
+// CRUISE speed-controller tunables, RAM (cruise_mode.hpp). Same dashboard
+// pattern as the leveler: applied live over SWD/BLE, and "save as defaults"
+// rewrites CRUISE-DEFAULTS-LINE in cruise_mode.hpp.
+volatile cruise_mode::Config g_cruise_config = {
+    cruise_mode::kDefaults.kp_us_per_mps, cruise_mode::kDefaults.min_throttle_us,
+    cruise_mode::kDefaults.max_throttle_us, cruise_mode::kDefaults.target_mps};
+
 namespace {
 
 path_mode::State g_path_state;
@@ -85,6 +93,12 @@ constexpr uint32_t kBaroEveryN = static_cast<uint32_t>(kLoopHz / 10.0f);
 constexpr uint32_t kBaroSettleReads = 5;     // ~0.5 s ignored after boot
 constexpr uint32_t kBaroZeroReads = 20;      // ~2 s averaged for the boot zero
 constexpr float kBaroZeroSpreadPa = 30.0f;   // ~2.5 m; a noisier window is retried
+
+// Climb rate (baro altitude differentiated between completed readings,
+// ~10 Hz) is one-pole low-passed at this cutoff before it goes into
+// telemetry and the 3-D speed. A display quantity, not a control input, so
+// fixed like attitude_level::kRateLpfHz rather than a live tunable.
+constexpr float kClimbLpfHz = 2.0f;
 
 // iBus staleness: if no new valid frame arrives for this many loop
 // iterations (>= 40 * 5 ms = 200 ms; longer when a baro read stretches an
@@ -260,6 +274,13 @@ int main() {
     uint32_t loop_count = 0;
     uint32_t baro_settle = 0, baro_n = 0;  // boot-time ground zero state
     float baro_sum = 0.0f, baro_first = 0.0f, baro_lo = 0.0f, baro_hi = 0.0f;
+    // Climb/3-D speed state: the published baro altitude differentiated
+    // across completed readings (dt accumulated from the measured loop
+    // period), then low-passed.
+    attitude_level::RateLpf climb_lpf;
+    float climb_mps = 0.0f;
+    float prev_baro_alt_m = 0.0f, prev_baro_ref_pa = 0.0f, baro_dt_s = 0.0f;
+    bool prev_baro_alt_valid = false;
     systick_start_free_running();
     uint32_t last_tick = systick_now();
     uint32_t last_frames_ok = 0;
@@ -306,6 +327,7 @@ int main() {
         g_telemetry.roll_deg  = filter.roll_deg();
         g_telemetry.pitch_deg = filter.pitch_deg();
 
+        baro_dt_s += dt_s;
         bmp280::Reading r;
         if (baro_ok && bmp280::step((loop_count % kBaroEveryN) == 0, r)) {
             g_telemetry.baro_temp_c      = r.temperature_c;
@@ -338,6 +360,29 @@ int main() {
             g_telemetry.baro_altitude_m  = ref_ok
                 ? 44330.0f * (1.0f - std::pow(r.pressure_pa / ref_pa, 0.1903f))
                 : r.altitude_m;
+            // Climb rate: differentiate the published altitude across
+            // completed readings, then low-pass. Raw baro noise is cm-scale,
+            // which a bare ~10 Hz derivative turns into ~1 m/s of jitter --
+            // harmless to the 3-D speed (groundspeed dominates the norm) but
+            // ugly on the climb readout. A reference change (the boot zero
+            // committing, or the dashboard's Altitude Calibration write)
+            // shifts the altitude basis by a constant: re-seed instead of
+            // letting that step show up as one huge false climb spike.
+            float alt_m = g_telemetry.baro_altitude_m;
+            if (!prev_baro_alt_valid || ref_pa != prev_baro_ref_pa) {
+                prev_baro_alt_m = alt_m;
+                prev_baro_ref_pa = ref_pa;
+                prev_baro_alt_valid = true;
+                climb_mps = 0.0f;
+                climb_lpf.y = 0.0f;
+                climb_lpf.seeded = true;
+            } else {
+                climb_mps = climb_lpf.update((alt_m - prev_baro_alt_m) / baro_dt_s,
+                                             kClimbLpfHz, baro_dt_s);
+                prev_baro_alt_m = alt_m;
+            }
+            baro_dt_s = 0.0f;
+            g_telemetry.baro_climb_mps = climb_mps;
         }
 
         // Magnetometer: one I2C transaction per tick (same non-blocking
@@ -441,7 +486,16 @@ int main() {
         g_telemetry.pwm_s4_us = servo_pwm::set_s4_us(mix_us(s4_off));
         // Throttle = iBus channel 3 (index 2) -> ESC on PWM_S2. Cut to off
         // if the RX has gone quiet; servos keep their last position.
-        servo_pwm::set_s2_motor_us(rx_stale ? 0 : ch[2]);
+        // CRUISE (CH5 high, index 4) overrides the stick immediately -- see
+        // cruise_mode.hpp; on the ground that means full power, so flip it
+        // only at the throw. The fix/freshness values here are one tick old
+        // (the GPS poll runs later in the loop), fine for a throttle
+        // decision. speed3d_mps is likewise last tick's published value.
+        uint16_t throttle_us = cruise_mode::step(
+            cruise_mode::snapshot(), ch[4] > 1500 && ch[4] <= 2100,
+            g_telemetry.gps_fix >= 2 && loops_since_gps < kGpsStaleLoops,
+            g_telemetry.speed3d_mps, ch[2]);
+        servo_pwm::set_s2_motor_us(rx_stale ? 0 : throttle_us);
 
         gps::poll();
         gps::Stats gps_stats = gps::snapshot();
@@ -464,6 +518,13 @@ int main() {
         g_telemetry.gps_course_deg  = gf.course_deg;
         g_telemetry.gps_sats        = gf.sats;
         g_telemetry.gps_fix         = gf.fix;
+
+        // 3-D speed over ground: UBX gSpeed is the horizontal (2-D)
+        // magnitude, so the full 3-D magnitude just adds the vertical
+        // component in quadrature. Ground-relative -- with no wind estimate
+        // on board it equals airspeed only in still air. With no baro the
+        // climb term stays 0 and this is plain groundspeed.
+        g_telemetry.speed3d_mps = std::sqrt(gf.speed_mps * gf.speed_mps + climb_mps * climb_mps);
 
         g_telemetry.seq = g_telemetry.seq + 1;
         loop_count++;

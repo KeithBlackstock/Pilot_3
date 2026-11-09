@@ -466,3 +466,77 @@ def save_declination_default(deg):
         raise ControlError("could not find the PATH-DEFAULTS-LINE in main.cpp")
     with open(MAIN_CPP, "w", encoding="utf-8", newline="") as f:
         f.write(new)
+
+
+# ---- cruise mode (speed hold) ----
+# Field order/limits mirror cruise_mode::Config and its sanitizer
+# (firmware/src/cruise_mode.hpp). Same live-config pattern as the leveler:
+# g_cruise_config in RAM, addressed by symbol, defaults saved by rewriting
+# the CRUISE-DEFAULTS-LINE in the header.
+CRUISE_FIELDS = ("kp_us_per_mps", "min_throttle_us", "max_throttle_us",
+                 "target_mps")
+CRUISE_LIMITS = {
+    "kp_us_per_mps": (0.0, 500.0),
+    "min_throttle_us": (1000.0, 2000.0), "max_throttle_us": (1000.0, 2000.0),
+    "target_mps": (0.0, 40.0),
+}
+CRUISE_HEADER = FIRMWARE / "src" / "cruise_mode.hpp"
+CRUISE_RE = re.compile(
+    r"(constexpr Config kDefaults = \{)[^}]*(\};  // CRUISE-DEFAULTS-LINE)")
+
+
+def validate_cruise(values):
+    """Return a clean {field: float} dict or raise ControlError."""
+    out = {}
+    for name in CRUISE_FIELDS:
+        if name not in values:
+            raise ControlError(f"missing field {name}")
+        try:
+            v = float(values[name])
+        except (TypeError, ValueError):
+            raise ControlError(f"{name}: not a number")
+        lo, hi = CRUISE_LIMITS[name]
+        if not (v == v) or v < lo or v > hi:  # also rejects NaN
+            raise ControlError(f"{name}: {v} outside [{lo}, {hi}]")
+        out[name] = v
+    if out["max_throttle_us"] < out["min_throttle_us"]:
+        raise ControlError("max_throttle_us below min_throttle_us")
+    return out
+
+
+def read_cruise_config(link):
+    """Read g_cruise_config as a {field: float} dict."""
+    addr = symbol_address("g_cruise_config")
+    vals = struct.unpack(f"<{len(CRUISE_FIELDS)}f",
+                         struct.pack(f"<{len(CRUISE_FIELDS)}I",
+                                     *link.read_words(addr, len(CRUISE_FIELDS))))
+    return {n: round(v, 6) for n, v in zip(CRUISE_FIELDS, vals)}
+
+
+def write_cruise_config(link, values):
+    """Write the cruise config and verify the readback. Returns the values
+    as actually read back."""
+    values = validate_cruise(values)
+    addr = symbol_address("g_cruise_config")
+    for i, name in enumerate(CRUISE_FIELDS):
+        word = struct.unpack("<I", struct.pack("<f", values[name]))[0]
+        link.write_word(addr + 4 * i, word)
+    back = read_cruise_config(link)
+    for name in CRUISE_FIELDS:
+        if abs(back[name] - values[name]) > 1e-4:
+            raise ControlError(f"{name} read back {back[name]} (wrote {values[name]})")
+    return back
+
+
+def save_cruise_defaults(values):
+    """Rewrite the kDefaults line in cruise_mode.hpp so the next build boots
+    with these values."""
+    values = validate_cruise(values)
+    with open(CRUISE_HEADER, encoding="utf-8", newline="") as f:  # newline="": keep the file's line endings
+        text = f.read()
+    items = ", ".join(_cfloat(values[n]) for n in CRUISE_FIELDS)
+    new, n = CRUISE_RE.subn(lambda m: f"{m.group(1)}{items}{m.group(2)}", text)
+    if n != 1:
+        raise ControlError("could not find the CRUISE-DEFAULTS-LINE in cruise_mode.hpp")
+    with open(CRUISE_HEADER, "w", encoding="utf-8", newline="") as f:
+        f.write(new)

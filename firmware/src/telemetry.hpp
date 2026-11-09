@@ -44,6 +44,12 @@ struct Telemetry {
     float mag_heading_deg;
     uint32_t mag_reads_ok;
     uint32_t mag_errors;
+    // Derived in main.cpp: climb from differentiated baro altitude (one-pole
+    // low-passed, + = up) and the 3-D speed over ground -- GPS groundspeed
+    // (2-D) combined with climb in quadrature. Ground-relative, not
+    // airspeed: there is no wind estimate on board.
+    float baro_climb_mps;
+    float speed3d_mps;
 };
 
 // Layout is hand-mirrored in tools/pilot3_attitude_monitor.py's struct
@@ -52,7 +58,8 @@ struct Telemetry {
 // this file can enforce).
 static_assert(sizeof(Telemetry) == 4 + 4 * 5 + 4 * 3 + 2 * ibus::kNumChannels + 2 * 2
                                    + 4 * 5 + 4 * 3 + 2 * 2
-                                   + 2 * 4 + 4 + 4 * 2,
+                                   + 2 * 4 + 4 + 4 * 2
+                                   + 4 * 2,
               "Telemetry layout changed -- update pilot3_attitude_monitor.py's struct format too");
 
 // Fixed SRAM address: must match kTelemetryAddr in

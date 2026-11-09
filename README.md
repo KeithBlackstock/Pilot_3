@@ -23,6 +23,7 @@ A 3-channel airplane with a V-tail (ruddervators) and a single motor.
 | CH1 | Elevator | Ruddervator mix (S1, S4) |
 | CH2 | Rudder | Ruddervator mix (S1, S4) |
 | CH3 | Throttle | ESC (S2) |
+| CH5 | Cruise arm | ESC (S2) speed hold (below) |
 
 Ruddervator mix (offsets in us around 1500, clamped to 1000-2000):
 
@@ -60,11 +61,22 @@ A roll-only navigation overlay on stabilize (`firmware/src/path_mode.hpp`), mode
 
 In this 3CH scheme there are no ailerons, so rudder (yaw) input is what induces roll. For control-input purposes, treat the CH2 "rudder" stick as the roll control: yaw and roll are coupled, and any future stabilization or mixing should regard it that way.
 
+### Cruise mode (CH5 speed hold)
+
+A proportional speed controller on the motor (`firmware/src/cruise_mode.hpp`). CH5 high hands the throttle to it, replacing the CH3 stick at the ESC output; CH5 low (or an invalid/absent CH5) passes the stick straight through, and the RX-stale motor cut applies either way. Everything else -- sticks, mix, stabilize, PATH -- is untouched; cruise only owns the motor.
+
+- **Engagement is immediate:** there is no arm/launch sequencing. The moment CH5 goes high the control law is in charge, so on the ground at standstill (speed 0, far below target) the output rails to `max_throttle_us`. That is deliberate -- the mode is meant to be switched on at the throw -- but it means CH5-high on the ground is FULL POWER. Flip it only at launch.
+- **Feedback:** the derived 3-D speed (`speed3d_mps` in telemetry: GPS groundspeed + baro-derived climb in quadrature). Ground-relative, not airspeed: in wind the loop holds constant ground speed, so true airspeed rises downwind and sags upwind.
+- **Control law:** `throttle_us = min_throttle_us + kp * (target_mps - speed3d_mps)`, clamped to [`min_throttle_us`, `max_throttle_us`]. P-only with a hard clamp: no integrator, so no anti-windup. The price is droop -- at zero error the output sits at min throttle, so the settled speed is always somewhat below target; raise kp to close the gap.
+- **GPS degradation:** with no fix or a stale NAV-PVT stream the speed feedback is frozen and the P output is meaningless, so cruise drops to `min_throttle_us` (a glide) until it returns or the pilot takes over.
+- **Tuning:** target speed, kp and min/max throttle are live-editable on the dashboard's cruise card (range-checked there and again in the firmware's `snapshot()`). "Save as firmware defaults" rewrites `CRUISE-DEFAULTS-LINE` in `cruise_mode.hpp`. Defaults: target 12 m/s, kp 50 us per m/s, min 1100 us, max 1600 us.
+
 ## Dashboard and configurator
 
 `pilot3.bat` (prompts for the link: 1 = SWD, 2 = BLE) starts OpenOCD and a browser dashboard (`tools/`) with live telemetry plus:
 
 - **Attitude leveler card:** shows whether the angle loop is on, and edits the gains (Kp, Kd), directions, max pitch/roll angles, deadband and authority limit. "Apply live" writes the values into the running FC's RAM over SWD (range-checked in the dashboard and again in the firmware; lost on reset). "Save as firmware defaults" rewrites `kDefaults` in `attitude_level.hpp` so the next build boots with them.
+- **Cruise mode card:** shows whether CH5 has engaged the speed hold, and edits the target speed, Kp and min/max throttle, with the same apply-live / save-as-defaults flow (defaults in `cruise_mode.hpp`).
 - **Compile & Flash:** runs `firmware/build.bat`, flashes the ELF through the running OpenOCD (verify + reset), then re-applies any live values and reads the config back. Telemetry pauses while it runs. It resets the board, so remove the prop first.
 - **Waypoint planner:** an OpenStreetMap map (Leaflet, needs internet) for placing, dragging and deleting up to 16 waypoints, with leg distances and the live aircraft position and course. Compile & Flash bakes the route into a generated `firmware/src/waypoints.hpp`, so the flashed firmware boots with the route loaded (see PATH above).
 
@@ -76,7 +88,7 @@ A CC41-A module (a BLE-only HM-10 clone, sold as "ZS-040") on the UART2 connecto
 
 - **Module identity:** the board-marked ZS-040 turned out to be a CC41-A (CC2541, Bluetooth 4.0 LE only -- `AT+VERSION?` reports "Firmware V3.0.6, Bluetooth V4.0 LE"). There is no classic SPP/RFCOMM in it, so the original COM-port plan was impossible; the dashboard talks BLE GATT instead via `tools/pilot3_ble_link.py` (needs `pip install --user bleak`). Serial service is `0xDFB0` with one characteristic `0xDFB1` (read/notify/write). The module advertises as "Pilot3" (address `00:15:87:10:9E:53`); Windows discovery often doesn't surface the name for this clone, so the launcher connects by address.
 - **9600 baud, 5 Hz:** the clone's UART bridge is hard-locked to 9600 baud -- it accepts `AT+BAUD4` and replies `+BAUD=4`, but the bridge never actually leaves 9600, and its AT interface is flaky (garbage replies at every baud; verified extensively over a SWD register bridge). So the firmware runs USART2 at 9600 8N1 and pushes telemetry at ~5 Hz: a frame is ~130 bytes (135 ms on the wire), and 5 Hz uses ~68% of the line. This is a module limitation, not a design choice -- a genuine HM-10 (or a classic HC-05, using the dashboard's `--serial` mode) would allow 115200 and 10 Hz again with a one-line BRR change in `bt.cpp`.
-- **How it works:** the firmware (`firmware/src/bt.cpp`) pushes the same 124-byte `Telemetry` struct the SWD dashboard polls, as framed packets, and answers peek/poke requests for 32-bit SRAM words -- the exact primitive every dashboard control is built on, so live config, baro zero, compass calibration and waypoint readback all work unchanged. Frames are `A5 5A | type | len | payload | crc16` (CRC16-CCITT); a CRC failure is dropped, never executed, and reads/writes are bounded to SRAM. Notifications arrive in ~20-byte BLE chunks; the host-side `FrameParser` (shared with `tools/pilot3_serial_link.py`, which has a codec self-test: run it directly) reassembles them. Link check: `python tools/pilot3_ble_link.py`.
+- **How it works:** the firmware (`firmware/src/bt.cpp`) pushes the same 132-byte `Telemetry` struct the SWD dashboard polls, as framed packets, and answers peek/poke requests for 32-bit SRAM words -- the exact primitive every dashboard control is built on, so live config, baro zero, compass calibration and waypoint readback all work unchanged. Frames are `A5 5A | type | len | payload | crc16` (CRC16-CCITT); a CRC failure is dropped, never executed, and reads/writes are bounded to SRAM. Notifications arrive in ~20-byte BLE chunks; the host-side `FrameParser` (shared with `tools/pilot3_serial_link.py`, which has a codec self-test: run it directly) reassembles them. Link check: `python tools/pilot3_ble_link.py`.
 - **AT notes (if you ever re-probe it):** AT is answered at 9600 while the module is unconnected; set-args take no `=` (`AT+NAMEPilot3`); `AT+RESET` reboots it. Holding the button at power-up drops this clone into a 38400-baud command mode. While unconnected it interprets the FC's telemetry stream as AT garbage and floods `ERROR` back -- harmless (the firmware just counts them in `g_bt_stats.crc_bad`), and it stops the moment a BLE central connects.
 - **Independence:** the SWD dashboard (option 1 in `pilot3.bat`) is untouched by all of this and works exactly as before.
 
@@ -88,14 +100,7 @@ A CC41-A module (a BLE-only HM-10 clone, sold as "ZS-040") on the UART2 connecto
 - GPS: 3D fix, 0 bad UBX frames
 - Servos: ruddervator response confirmed correct for both axes
 - ESC/motor: throttle on CH3 drives the motor correctly
-
-## Future features
-
-Not implemented. Design notes only. (PATH itself -- steering, route logic, pilot abort, and route loading via Compile & Flash -- is implemented; see Control architecture above.)
-
-- **Compass tilt compensation** from the existing roll/pitch estimate. The heading is currently planar, so it is only trustworthy near level.
-- **Live waypoint upload over SWD** (e.g. into a reserved flash page), so the route can change on the bench without a rebuild and reflash.
-- **Waypoint altitude, loiter at end of route, and a descent-rate guard** like INAV's CALM.
+- Cruise: CH5 engages the speed hold immediately (full power at standstill, so flip it at the throw)
 
 ## Layout
 

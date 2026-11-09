@@ -274,7 +274,7 @@ def _selftest():
     values = (42, 1.5, -2.5, 20.0, 101325.0, 15.5, 100, 50, 0) \
         + tuple(1000 + i for i in range(14)) + (1500, 1520) \
         + (479912345, -1223456789, 100.0, 12.5, 90.0, 999, 888, 0, 9, 3) \
-        + (10, -20, 30, 1, 123.5, 7000, 2)
+        + (10, -20, 30, 1, 123.5, 7000, 2) + (0.5, 12.75)  # float32-exact values only
     payload = struct.pack(STRUCT_FMT, *values)
     got = p.feed(encode_frame(RSP_TELEMETRY, payload))
     assert got and got[0][0] == RSP_TELEMETRY

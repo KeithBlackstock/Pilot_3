@@ -352,6 +352,8 @@ void send_telemetry() {
     t.mag_heading_deg = g_telemetry.mag_heading_deg;
     t.mag_reads_ok = g_telemetry.mag_reads_ok;
     t.mag_errors = g_telemetry.mag_errors;
+    t.baro_climb_mps = g_telemetry.baro_climb_mps;
+    t.speed3d_mps = g_telemetry.speed3d_mps;
     uint8_t frame[6 + sizeof(Telemetry)];
     uint32_t n = build_frame(kRspTelemetry, reinterpret_cast<const uint8_t*>(&t),
                              sizeof(Telemetry), frame);

@@ -98,6 +98,7 @@
       <div class="readout"><div class="val" id="baro-t">–</div><div class="lbl">Temperature</div></div>
       <div class="readout"><div class="val" id="baro-p">–</div><div class="lbl">Pressure</div></div>
       <div class="readout"><div class="val" id="baro-a">–</div><div class="lbl">Altitude</div></div>
+      <div class="readout"><div class="val" id="baro-c">–</div><div class="lbl">Climb</div></div>
     </div>
     <button id="btn-baro-zero" style="margin-top:12px">Altitude Calibration</button>
     <div class="note" id="baro-note"></div>
@@ -116,6 +117,7 @@
     <div class="readouts" style="margin-top:12px">
       <div class="readout"><div class="val" id="gps-alt">–</div><div class="lbl">Altitude (MSL)</div></div>
       <div class="readout"><div class="val" id="gps-spd">–</div><div class="lbl">Ground speed</div></div>
+      <div class="readout"><div class="val" id="gps-spd3d">–</div><div class="lbl">3D speed</div></div>
       <div class="readout"><div class="val" id="gps-crs">–</div><div class="lbl">Course</div></div>
     </div>
     <div class="stats" id="gps-stats" style="margin-top:12px">–</div>
@@ -184,6 +186,23 @@
     <button id="btn-reload">Reload from FC</button>
     <button id="btn-save">Save as firmware defaults</button>
     <div class="note" id="cfg-note">Live values are lost on reset unless saved as defaults and flashed.</div>
+  </section>
+
+  <section class="card">
+    <h2>Cruise mode (CH5)</h2>
+    <div class="stats" style="margin-bottom:8px">Holds the target 3-D speed with the motor (P on speed error, ground-relative).
+      CH5 high engages immediately -- full power at standstill, so flip it only at the throw.
+      State: <span class="modebadge" id="crz-state">–</span></div>
+    <div class="cfg">
+      <label for="crz-target_mps">Target speed (m/s)</label><input id="crz-target_mps" type="number" step="0.5" min="0" max="40">
+      <label for="crz-kp_us_per_mps">Kp (µs per m/s of error)</label><input id="crz-kp_us_per_mps" type="number" step="1" min="0" max="500">
+      <label for="crz-min_throttle_us">Min throttle (µs)</label><input id="crz-min_throttle_us" type="number" step="10" min="1000" max="2000">
+      <label for="crz-max_throttle_us">Max throttle (µs)</label><input id="crz-max_throttle_us" type="number" step="10" min="1000" max="2000">
+    </div>
+    <button class="primary" id="btn-crz-apply">Apply live</button>
+    <button id="btn-crz-reload">Reload from FC</button>
+    <button id="btn-crz-save">Save as firmware defaults</button>
+    <div class="note" id="crz-note">Live values are lost on reset unless saved as defaults and flashed. CH5 high = prop is live, full power on the ground.</div>
   </section>
 
   <section class="card">
@@ -299,6 +318,38 @@ function validValues() {
 document.getElementById("btn-apply").onclick = () => { const v = validValues(); if (v) sendCmd({ cmd: "set_config", values: v }); };
 document.getElementById("btn-reload").onclick = () => sendCmd({ cmd: "get_config" });
 document.getElementById("btn-save").onclick = () => { const v = validValues(); if (v) sendCmd({ cmd: "save_defaults", values: v }); };
+
+// ---- cruise mode config (same live-config pattern as the leveler) ----
+const CRZ_FIELDS = ["target_mps", "kp_us_per_mps", "min_throttle_us", "max_throttle_us"];
+let crzLoaded = {};   // last values known to be on the FC
+const crzEl = (n) => document.getElementById("crz-" + n);
+function crzNote(text, err) {
+  const el = document.getElementById("crz-note");
+  el.textContent = text; el.className = "note" + (err ? " err" : "");
+}
+function crzMarkDirty() {
+  CRZ_FIELDS.forEach(n => {
+    const el = crzEl(n);
+    el.classList.toggle("dirty", crzLoaded[n] !== undefined && parseFloat(el.value) !== crzLoaded[n]);
+  });
+}
+CRZ_FIELDS.forEach(n => { crzEl(n).addEventListener("input", crzMarkDirty); crzEl(n).addEventListener("change", crzMarkDirty); });
+function applyCruise(m) {
+  if (m.values == null) { crzNote(m.note || "cruise config error", true); return; }
+  crzLoaded = m.values;
+  CRZ_FIELDS.forEach(n => { crzEl(n).value = m.values[n]; });
+  crzMarkDirty();
+  crzNote(m.note || "", !!m.err);
+}
+function crzValidValues() {
+  const v = {};
+  CRZ_FIELDS.forEach(n => { v[n] = parseFloat(crzEl(n).value); });
+  if (Object.values(v).some(x => Number.isNaN(x))) { crzNote("Enter a number in every field.", true); return null; }
+  return v;
+}
+document.getElementById("btn-crz-apply").onclick = () => { const v = crzValidValues(); if (v) sendCmd({ cmd: "set_cruise", values: v }); };
+document.getElementById("btn-crz-reload").onclick = () => sendCmd({ cmd: "get_cruise" });
+document.getElementById("btn-crz-save").onclick = () => { const v = crzValidValues(); if (v) sendCmd({ cmd: "save_cruise", values: v }); };
 document.getElementById("btn-baro-zero").onclick = () => {
   const note = document.getElementById("baro-note");
   note.className = "note"; note.textContent = "Sampling pressure for ~2 s…";
@@ -394,8 +445,16 @@ function updateLevelerState(ch) {
   el.textContent = on ? "angle mode (CH6 > 1500)" : "off — sticks direct";
 }
 
+function updateCruiseState(ch) {
+  const el = document.getElementById("crz-state");
+  const on = ch[4] > 1500 && ch[4] <= 2100;
+  el.className = "modebadge" + (on ? " on" : "");
+  el.textContent = on ? "engaged (CH5 high) — motor is LIVE" : "off — stick throttle";
+}
+
 function update(m) {
   if (m.type === "config") { applyConfig(m); return; }
+  if (m.type === "cruise_config") { applyCruise(m); return; }
   if (m.type === "config_error") { cfgNote(m.error, true); return; }
   if (m.type === "job") { updateJob(m); return; }
   if (m.type === "baro_cal") { updateBaroCal(m); return; }
@@ -417,6 +476,7 @@ function update(m) {
   document.getElementById("baro-t").innerHTML = signedFmt(m.baro_temp_c, 2, "°C");
   document.getElementById("baro-p").innerHTML = fmt(m.baro_pressure_pa / 100, 2, "hPa");
   document.getElementById("baro-a").innerHTML = signedFmt(m.baro_altitude_m, 2, "m");
+  document.getElementById("baro-c").innerHTML = signedFmt(m.baro_climb_mps, 1, "m/s");
 
   if (m.gps) {
     const g = m.gps;
@@ -434,6 +494,7 @@ function update(m) {
     document.getElementById("gps-lon").innerHTML = hasFix ? signedFmt(g.lon_deg, 7, "°") : "–";
     document.getElementById("gps-alt").innerHTML = hasFix ? fmt(g.alt_m, 1, "m") : "–";
     document.getElementById("gps-spd").innerHTML = hasFix ? fmt(g.speed_mps, 1, "m/s") : "–";
+    document.getElementById("gps-spd3d").innerHTML = hasFix ? fmt(m.speed3d_mps, 1, "m/s") : "–";
     document.getElementById("gps-crs").innerHTML = hasFix ? fmt(g.course_deg, 1, "°") : "–";
     document.getElementById("gps-stats").textContent =
       `rx ${g.rx_bytes} B   frames ok ${g.sentences_ok}   bad ${g.sentences_bad}` +
@@ -450,6 +511,7 @@ function update(m) {
     chRows[i].num.textContent = v;
   });
   updateLevelerState(m.ibus_ch);
+  updateCruiseState(m.ibus_ch);
   document.getElementById("pwm-s1").innerHTML = fmt(m.pwm_s1_us, 0, "µs");
   document.getElementById("pwm-s4").innerHTML = fmt(m.pwm_s4_us, 0, "µs");
 }
@@ -572,7 +634,7 @@ initWaypoints();
 function connect() {
   const sock = new WebSocket(WS_URL);
   ws = sock;
-  sock.onopen = () => { setStatus("", "connected, waiting for data…"); sendCmd({ cmd: "get_config" }); };
+  sock.onopen = () => { setStatus("", "connected, waiting for data…"); sendCmd({ cmd: "get_config" }); sendCmd({ cmd: "get_cruise" }); };
   sock.onmessage = (e) => update(JSON.parse(e.data));
   sock.onclose = () => { setStatus("", "server disconnected — retrying…"); setTimeout(connect, 1000); };
   sock.onerror = () => sock.close();
