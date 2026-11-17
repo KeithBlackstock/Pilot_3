@@ -27,6 +27,14 @@
 // behaves as plain stabilize, so an availability glitch cannot silently
 // re-arm it); the caller clears it when CH6 leaves the high position, and
 // the next rise restarts the route at waypoint 1 as usual.
+//
+// TIP (temporary interrupt of path): if the bank angle itself exceeds
+// tip_bank_deg while engaged -- a gust, wake, or a botched turn -- PATH
+// suspends and the caller's plain-stabilize path levels the wings. Unlike
+// the pilot abort this is not sticky: once the roll is back under the
+// threshold PATH re-engages on the same leg and carries on the route (st.leg
+// is preserved -- a fresh engage edge, which restarts at waypoint 1, only
+// happens from a non-TIP disengagement).
 #pragma once
 #include <cmath>
 #include <cstdint>
@@ -48,9 +56,11 @@ struct Config {
     Waypoint wp[kMaxWaypoints];
     // Appended last: the dashboard reaches declination_deg by byte offset.
     float abort_deadband_us; // pilot roll stick past this aborts to stabilize
+    float tip_bank_deg;      // |roll| past this suspends PATH until level again
 };
 
 constexpr float kMaxCaptureM = 500.0f;
+constexpr float kMaxTipBankDeg = 90.0f;  // clamp on the TIP threshold
 constexpr float kMetersPerDegLat = 111320.0f;
 constexpr float kRadToDeg = 57.29578f;
 constexpr float kDegToRad = 0.01745329f;
@@ -84,6 +94,7 @@ inline void bearing_distance(int32_t lat1_e7, int32_t lon1_e7, int32_t lat2_e7, 
 struct State {
     bool engaged = false;
     bool aborted = false;  // pilot took the roll stick; latched until CH6 leaves high
+    bool tip = false;      // suspended on excessive bank; resumes (same leg) when level
     uint32_t leg = 0;      // index of the waypoint being flown; == count when finished
 };
 
@@ -100,16 +111,19 @@ inline bool available(const Config& c, bool gps_3d, bool mag_ok, bool rx_ok) {
 // Call every loop tick. `want` = switch high AND available(). A rising edge
 // restarts the route at waypoint 1. `pilot_roll_us` is the roll stick offset
 // (us about center): past abort_deadband_us it latches the abort (see the
-// header comment). Returns the bank request.
+// header comment). `roll_deg` is the current bank (filter frame) for the TIP
+// check. Returns the bank request.
 inline Output step(State& st, const Config& c, bool want, int32_t lat_e7, int32_t lon_e7,
-                   float mag_heading_deg, float pilot_roll_us) {
+                   float mag_heading_deg, float pilot_roll_us, float roll_deg) {
     if (!want) {
         st.engaged = false;
+        st.tip = false;
         return {0.0f, false};
     }
     uint32_t count = c.count > static_cast<uint32_t>(kMaxWaypoints)
                          ? static_cast<uint32_t>(kMaxWaypoints) : c.count;
-    if (!st.engaged) {
+    if (!st.engaged && !st.tip) {
+        // Fresh engage (not a TIP resume): restart the route at waypoint 1.
         st.engaged = true;
         st.leg = 0;
     }
@@ -120,7 +134,24 @@ inline Output step(State& st, const Config& c, bool want, int32_t lat_e7, int32_
         std::fabs(pilot_roll_us) > clampf(c.abort_deadband_us, 0.0f, 500.0f)) {
         st.engaged = false;
         st.aborted = true;
+        st.tip = false;
         return {0.0f, false};
+    }
+    // TIP (see the header comment): over-banked while steering -> suspend to
+    // plain stabilize until the wings are back under the threshold, then
+    // resume on the same leg. 0 disables the check.
+    float tip_deg = clampf(c.tip_bank_deg, 0.0f, kMaxTipBankDeg);
+    if (tip_deg > 0.0f) {
+        if (st.engaged && std::fabs(roll_deg) > tip_deg) {
+            st.engaged = false;
+            st.tip = true;
+            return {0.0f, false};
+        }
+        if (st.tip) {
+            if (std::fabs(roll_deg) > tip_deg) return {0.0f, false};  // still hot
+            st.tip = false;
+            st.engaged = true;  // resume; st.leg untouched
+        }
     }
     float capture = clampf(c.capture_radius_m, 1.0f, kMaxCaptureM);
     float bearing = 0.0f, dist = 0.0f;
