@@ -163,6 +163,12 @@
   </section>
 
   <section class="card">
+    <h2>Blackbox</h2>
+    <button class="primary" id="btn-blackbox">Record 60 seconds</button>
+    <div class="note" id="blackbox-note">Captures pitch, roll, heading, 3-D speed, and barometric altitude to a CSV file.</div>
+  </section>
+
+  <section class="card">
     <h2>Attitude leveler (CH6)</h2>
     <div class="stats" style="margin-bottom:8px">Sticks request angles; P on accel angle, D on gyro rate.
       State: <span class="modebadge" id="lvl-state">–</span></div>
@@ -452,6 +458,74 @@ function updateCruiseState(ch) {
   el.textContent = on ? "engaged (CH5 high) — motor is LIVE" : "off — stick throttle";
 }
 
+// ---- Blackbox: record fresh telemetry locally, then download one CSV ----
+const BLACKBOX_DURATION_MS = 60000;
+const blackboxBtn = document.getElementById("btn-blackbox");
+const blackboxNoteEl = document.getElementById("blackbox-note");
+let blackbox = null;
+
+function blackboxNote(text, err = false) {
+  blackboxNoteEl.textContent = text;
+  blackboxNoteEl.className = "note" + (err ? " err" : "");
+}
+
+function finishBlackbox() {
+  const capture = blackbox;
+  if (!capture) return;
+  blackbox = null;
+  clearInterval(capture.progressTimer);
+  clearTimeout(capture.finishTimer);
+  blackboxBtn.disabled = false;
+  if (!capture.rows.length) {
+    blackboxNote("No telemetry captured; no CSV was created.", true);
+    return;
+  }
+
+  const header = ["elapsed_s", "seq", "pitch_deg", "roll_deg", "heading_deg", "speed3d_mps", "baro_altitude_m"];
+  const csv = [header, ...capture.rows].map(row => row.join(",")).join("\r\n") + "\r\n";
+  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `pilot3_blackbox_${new Date().toISOString().replace(/[:.]/g, "-")}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+  const partial = capture.disconnected || capture.gaps;
+  blackboxNote(`${partial ? "Partial capture" : "Capture"} saved: ${capture.rows.length} samples.`, partial);
+}
+
+function captureBlackbox(m) {
+  if (!blackbox || m.seq === blackbox.lastSeq) return;
+  const now = performance.now();
+  if (blackbox.lastSampleAt !== null && now - blackbox.lastSampleAt > 1000) blackbox.gaps = true;
+  blackbox.lastSeq = m.seq;
+  blackbox.lastSampleAt = now;
+  blackbox.rows.push([
+    ((now - blackbox.startedAt) / 1000).toFixed(3), m.seq,
+    m.pitch_deg, m.roll_deg,
+    (m.mag && m.mag.present) ? m.mag.heading_deg : "",
+    m.speed3d_mps, m.baro_altitude_m,
+  ]);
+}
+
+blackboxBtn.onclick = () => {
+  if (blackbox) return;
+  blackbox = {
+    startedAt: performance.now(), rows: [], lastSeq: null, lastSampleAt: null,
+    disconnected: false, gaps: false, progressTimer: null, finishTimer: null,
+  };
+  blackboxBtn.disabled = true;
+  blackboxNote("Recording… 60 s remaining (0 samples).");
+  blackbox.progressTimer = setInterval(() => {
+    if (!blackbox) return;
+    const remaining = Math.max(0, Math.ceil((BLACKBOX_DURATION_MS - (performance.now() - blackbox.startedAt)) / 1000));
+    blackboxNote(`Recording… ${remaining} s remaining (${blackbox.rows.length} samples).`);
+  }, 250);
+  blackbox.finishTimer = setTimeout(finishBlackbox, BLACKBOX_DURATION_MS);
+};
+
 function update(m) {
   if (m.type === "config") { applyConfig(m); return; }
   if (m.type === "cruise_config") { applyCruise(m); return; }
@@ -461,9 +535,11 @@ function update(m) {
   if (m.type === "mag_cal") { updateMagCal(m); return; }
   if (m.type === "waypoints") { applyWaypoints(m); return; }
   if (!m.connected) {
+    if (blackbox) blackbox.disconnected = true;
     setStatus("", m.error || "waiting for device…");
     return;
   }
+  captureBlackbox(m);
   setStatus(m.stale ? "stale" : "live",
             (m.stale ? "STALE — firmware not running? " : "live ") + `seq ${m.seq}`);
 
