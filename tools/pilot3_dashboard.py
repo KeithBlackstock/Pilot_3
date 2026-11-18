@@ -62,6 +62,7 @@ except ImportError:  # bleak is guarded inside the module; guard anyway
     bl = None
 
 PAGE_PATH = Path(__file__).resolve().parent / "dashboard.html"
+BLACKBOX_PATH = Path(__file__).resolve().parent.parent / "logs" / "pilot3_blackbox.csv"
 
 # OpenOCD supervision (see module docstring). Same binary and args as
 # pilot3.bat.
@@ -404,8 +405,26 @@ class Controller:
         self.hub.broadcast({"type": "waypoints", "points": points, "note": note},
                            sticky=False)
 
+    def _save_blackbox(self, msg):
+        try:
+            csv_text = msg.get("csv")
+            if not isinstance(csv_text, str) or not csv_text.strip():
+                raise ValueError("empty Blackbox capture")
+            BLACKBOX_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with BLACKBOX_PATH.open("w", encoding="utf-8", newline="") as f:
+                f.write(csv_text)
+            self.hub.broadcast({"type": "blackbox_saved", "ok": True,
+                                "samples": msg.get("samples"),
+                                "partial": bool(msg.get("partial"))}, sticky=False)
+        except (OSError, ValueError) as e:
+            self.hub.broadcast({"type": "blackbox_saved", "ok": False,
+                                "error": str(e)}, sticky=False)
+
     def handle(self, msg):
         cmd = msg.get("cmd")
+        if cmd == "save_blackbox":
+            self._save_blackbox(msg)
+            return
         if cmd in ("get_cruise", "set_cruise", "save_cruise"):
             self._handle_cruise(msg)
             return

@@ -290,8 +290,9 @@ function cfgNote(text, err) {
   el.textContent = text; el.className = "note" + (err ? " err" : "");
 }
 function sendCmd(obj) {
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
-  else cfgNote("Not connected to the dashboard server.", true);
+  if (ws && ws.readyState === 1) { ws.send(JSON.stringify(obj)); return true; }
+  cfgNote("Not connected to the dashboard server.", true);
+  return false;
 }
 function cfgValues() {
   const v = {};
@@ -458,7 +459,7 @@ function updateCruiseState(ch) {
   el.textContent = on ? "engaged (CH5 high) — motor is LIVE" : "off — stick throttle";
 }
 
-// ---- Blackbox: record fresh telemetry locally, then download one CSV ----
+// ---- Blackbox: record fresh telemetry, then overwrite the server CSV ----
 const BLACKBOX_DURATION_MS = 60000;
 const blackboxBtn = document.getElementById("btn-blackbox");
 const blackboxNoteEl = document.getElementById("blackbox-note");
@@ -475,25 +476,22 @@ function finishBlackbox() {
   blackbox = null;
   clearInterval(capture.progressTimer);
   clearTimeout(capture.finishTimer);
-  blackboxBtn.disabled = false;
   if (!capture.rows.length) {
+    blackboxBtn.disabled = false;
     blackboxNote("No telemetry captured; no CSV was created.", true);
     return;
   }
 
   const header = ["elapsed_s", "seq", "pitch_deg", "roll_deg", "heading_deg", "speed3d_mps", "baro_altitude_m"];
   const csv = [header, ...capture.rows].map(row => row.join(",")).join("\r\n") + "\r\n";
-  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `pilot3_blackbox_${new Date().toISOString().replace(/[:.]/g, "-")}.csv`;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-
+  const samples = capture.rows.length;
   const partial = capture.disconnected || capture.gaps;
-  blackboxNote(`${partial ? "Partial capture" : "Capture"} saved: ${capture.rows.length} samples.`, partial);
+  if (!sendCmd({ cmd: "save_blackbox", csv, samples, partial })) {
+    blackboxBtn.disabled = false;
+    blackboxNote("Capture complete, but the dashboard server is disconnected; CSV was not saved.", true);
+    return;
+  }
+  blackboxNote("Saving capture to logs/pilot3_blackbox.csv…");
 }
 
 function captureBlackbox(m) {
@@ -534,6 +532,13 @@ function update(m) {
   if (m.type === "baro_cal") { updateBaroCal(m); return; }
   if (m.type === "mag_cal") { updateMagCal(m); return; }
   if (m.type === "waypoints") { applyWaypoints(m); return; }
+  if (m.type === "blackbox_saved") {
+    blackboxBtn.disabled = false;
+    blackboxNote(m.ok
+      ? `${m.partial ? "Partial capture" : "Capture"} saved to logs/pilot3_blackbox.csv (${m.samples} samples).`
+      : `Blackbox save failed: ${m.error}`, !m.ok || m.partial);
+    return;
+  }
   if (!m.connected) {
     if (blackbox) blackbox.disconnected = true;
     setStatus("", m.error || "waiting for device…");
