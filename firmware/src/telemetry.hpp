@@ -42,6 +42,9 @@ struct Telemetry {
     int16_t mag_z;
     uint16_t mag_present;  // 1 = chip found at boot, 0 = absent/init failed
     float mag_heading_deg;
+    // FC-wide true heading: mag_heading_deg + declination below 5 m/s GPS
+    // ground speed, otherwise GPS course over ground. Selected in main.cpp.
+    float heading_deg;
     uint32_t mag_reads_ok;
     uint32_t mag_errors;
     // Derived in main.cpp: climb from differentiated baro altitude (one-pole
@@ -58,7 +61,7 @@ struct Telemetry {
 // this file can enforce).
 static_assert(sizeof(Telemetry) == 4 + 4 * 5 + 4 * 3 + 2 * ibus::kNumChannels + 2 * 2
                                    + 4 * 5 + 4 * 3 + 2 * 2
-                                   + 2 * 4 + 4 + 4 * 2
+                                   + 2 * 4 + 4 * 2 + 4 * 2
                                    + 4 * 2,
               "Telemetry layout changed -- update pilot3_attitude_monitor.py's struct format too");
 

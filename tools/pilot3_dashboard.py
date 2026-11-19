@@ -273,13 +273,13 @@ def telemetry_msg(f, last_seq):
                            f[9 + NUM_CHANNELS + 2:9 + NUM_CHANNELS + 2 + 10])),
                 "lat_deg": f[9 + NUM_CHANNELS + 2] / 1e7,
                 "lon_deg": f[9 + NUM_CHANNELS + 3] / 1e7},
-        # Mag group is 7 fields (4h f 2I): +17, not +16 -- the old poll_loop
-        # sliced one short and the page's mag "err" readout was undefined.
+        # Mag group is 7 fields (4h f 2I), followed by the FC-wide heading.
         "mag": dict(zip(("x", "y", "z", "present", "heading_deg", "reads_ok", "errors"),
                         f[9 + NUM_CHANNELS + 2 + 10:9 + NUM_CHANNELS + 2 + 17])),
-        # Derived pair appended after the mag group (2 floats, +17/+18).
-        "baro_climb_mps": f[9 + NUM_CHANNELS + 2 + 17],
-        "speed3d_mps": f[9 + NUM_CHANNELS + 2 + 18],
+        "heading_deg": f[9 + NUM_CHANNELS + 2 + 17],
+        # Derived pair appended after the shared heading (2 floats, +18/+19).
+        "baro_climb_mps": f[9 + NUM_CHANNELS + 2 + 18],
+        "speed3d_mps": f[9 + NUM_CHANNELS + 2 + 19],
     }
 
 
@@ -405,6 +405,21 @@ class Controller:
         self.hub.broadcast({"type": "waypoints", "points": points, "note": note},
                            sticky=False)
 
+    def _push_waypoints(self, points):
+        """Push the map's route into the FC's RAM (g_path_config) over the
+        live link: PATH flies it immediately, no rebuild/reflash. Volatile --
+        lost on reboot; Compile & Flash is what bakes a route in permanently."""
+        try:
+            pushed = fc.push_waypoints(self._require_link(), points)
+        except (fc.ControlError, OSError) as e:
+            self.hub.broadcast({"type": "waypoints", "points": None,
+                                "note": f"Route push failed: {e}"}, sticky=False)
+            return
+        note = (f"Pushed {len(pushed)} waypoint(s) to the FC (RAM -- lost on reboot)."
+                if pushed else "Route cleared on the FC (RAM -- lost on reboot).")
+        self.hub.broadcast({"type": "waypoints", "points": pushed, "note": note},
+                           sticky=False)
+
     def _save_blackbox(self, msg):
         try:
             csv_text = msg.get("csv")
@@ -464,6 +479,8 @@ class Controller:
                               values, msg.get("heading_offset"))
             elif cmd == "build_flash":
                 self._start_job(msg.get("waypoints"))
+            elif cmd == "push_waypoints":
+                self._push_waypoints(msg.get("waypoints"))
             else:
                 return
         except fc.ControlError as e:

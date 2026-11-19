@@ -8,7 +8,7 @@ with `mdw`, and neither side blocks on the other.
 Requires the firmware already flashed and running, and OpenOCD already
 attached (pilot3_fw_build_flash.bat does both).
 
-Telemetry struct (see firmware/src/telemetry.hpp), 132 bytes at a fixed
+Telemetry struct (see firmware/src/telemetry.hpp), 136 bytes at a fixed
 SRAM address:
     uint32_t seq;
     float    roll_deg;
@@ -28,6 +28,7 @@ SRAM address:
     uint16_t gps_sats, gps_fix;
     int16_t  mag_x, mag_y, mag_z;  uint16_t mag_present;
     float    mag_heading_deg;      (atan2(y, x) of calibrated field, magnetic)
+    float    heading_deg;          (FC-wide mag/COG selection, true north)
     uint32_t mag_reads_ok, mag_errors;
     float    baro_climb_mps;       (differentiated baro altitude, low-passed)
     float    speed3d_mps;          (GPS groundspeed + climb in quadrature)
@@ -46,8 +47,8 @@ TELEMETRY_ADDR = 0x20000000
 NUM_CHANNELS = 14
 # seq, roll, pitch, baro x3, ibus x3, then channels + 2 pwm outputs (2B each),
 # and the derived climb + 3-D speed pair at the end.
-TELEMETRY_WORDS = 9 + (NUM_CHANNELS * 2 + 2 * 2) // 4 + 5 + 3 + 1 + 5 + 2
-STRUCT_FMT = f"<IfffffIII{NUM_CHANNELS}H2H" "2i3f3I2H" "4hf2I" "2f"
+TELEMETRY_WORDS = 9 + (NUM_CHANNELS * 2 + 2 * 2) // 4 + 5 + 3 + 2 + 5 + 2
+STRUCT_FMT = f"<IfffffIII{NUM_CHANNELS}H2H" "2i3f3I2H" "4h2f2I" "2f"
 # Anchor on the "0xADDR: " prefix OpenOCD's mdw response uses, same as the
 # probe script's read_word() -- a bare 8-hex-digit pattern would also match
 # the echoed command text ("mdw 0x20000000 16") and the address label itself.

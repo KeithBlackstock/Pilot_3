@@ -273,6 +273,41 @@ def read_waypoints(link):
     return [[ints[2 * i] / 1e7, ints[2 * i + 1] / 1e7] for i in range(count)]
 
 
+def push_waypoints(link, points):
+    """Write a route into g_path_config (RAM) over the live link -- PATH
+    flies it immediately, with no rebuild or reflash. Volatile: lost on
+    reboot/reset (Compile & Flash bakes a route in permanently; this is the
+    field-planning path). Returns the route as actually read back."""
+    if not isinstance(points, list) or len(points) > 16:
+        raise ControlError("waypoints: expected a list of at most 16 points")
+    pairs = []
+    for p in points:
+        try:
+            lat, lon = float(p[0]), float(p[1])
+        except (TypeError, ValueError, IndexError):
+            raise ControlError(f"bad waypoint {p!r}")
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):  # also rejects NaN
+            raise ControlError(f"waypoint out of range: {lat}, {lon}")
+        pairs.append((round(lat * 1e7), round(lon * 1e7)))
+    pairs += [(0, 0)] * (16 - len(pairs))
+    addr = symbol_address("g_path_config")
+    # Array first, count LAST: PATH re-reads the config every loop tick, and
+    # this order means it never sees a new count pointing at a half-written
+    # array. The header tunables (k_path, capture radius, declination, and
+    # the fields after the array) are untouched.
+    for i, (lat_e7, lon_e7) in enumerate(pairs):
+        link.write_word(addr + 16 + 8 * i,
+                        struct.unpack("<I", struct.pack("<i", lat_e7))[0])
+        link.write_word(addr + 20 + 8 * i,
+                        struct.unpack("<I", struct.pack("<i", lon_e7))[0])
+    link.write_word(addr, len(points))
+    back = read_waypoints(link)
+    back_e7 = [(round(b[0] * 1e7), round(b[1] * 1e7)) for b in back]
+    if back_e7 != pairs[:len(points)]:
+        raise ControlError("route read back wrong after push")
+    return back
+
+
 def _cfloat(v):
     s = f"{v:.6g}"
     if not any(c in s for c in ".eE"):

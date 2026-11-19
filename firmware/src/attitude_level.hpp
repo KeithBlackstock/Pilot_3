@@ -1,9 +1,10 @@
 // Angle-command loop for pitch and roll: P on the angle error (with a soft
-// center: gain ramps up with error, see soft_p) plus D on the gyro rate. Stateless (no integrator, no filter state). The P term uses the
-// complementary-filter angle (gyro-led short term, so brief linear accelerations
-// from launch/throttle/vibration are mostly rejected); the D term uses the gyro rate directly and simply
-// opposes angular velocity (it wants 0 deg/s), so there are no rate limits
-// and no cascade -- the two terms just act together on the surface offset.
+// center: gain ramps up with error, see soft_p) plus D on the corresponding
+// Euler angle rate. Stateless (no integrator, no filter state). The P term uses
+// the complementary-filter angle (gyro-led short term, so brief linear
+// accelerations from launch/throttle/vibration are mostly rejected); the D term
+// simply opposes angular velocity (it wants 0 deg/s), so there are no rate
+// limits and no cascade -- the two terms just act together on the surface offset.
 //
 // The pilot's sticks are angle requests: full CH2 deflection (the pitch stick,
 // differential slot) asks for +-max_pitch_deg, full CH1 (common slot) for
@@ -48,7 +49,7 @@ struct Config {
     float trim_pitch_us;  // pitch subtrim added after the loop, all modes (+ = nose up)
 };
 
-constexpr Config kDefaults = {3.0f, 3.0f, 0.4f, 0.4f, -1.0f, 1.0f, 60.0f, 20.0f, 30.0f, 250.0f, 5.0f, 0.0f};  // DEFAULTS-LINE
+constexpr Config kDefaults = {3.0f, 2.0f, 0.3f, 0.2f, -1.0f, 1.0f, 60.0f, 40.0f, 30.0f, 250.0f, 5.0f, 30.0f};  // DEFAULTS-LINE
 
 // Cutoff of the one-pole low-pass on the gyro rate fed to the D term (see
 // RateLpf). Deliberately not a live tunable: a mild fixed value (~4 ms of lag)

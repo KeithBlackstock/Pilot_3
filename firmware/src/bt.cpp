@@ -350,6 +350,7 @@ void send_telemetry() {
     t.mag_z = g_telemetry.mag_z;
     t.mag_present = g_telemetry.mag_present;
     t.mag_heading_deg = g_telemetry.mag_heading_deg;
+    t.heading_deg = g_telemetry.heading_deg;
     t.mag_reads_ok = g_telemetry.mag_reads_ok;
     t.mag_errors = g_telemetry.mag_errors;
     t.baro_climb_mps = g_telemetry.baro_climb_mps;

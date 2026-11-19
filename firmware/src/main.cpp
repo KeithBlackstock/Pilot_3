@@ -108,7 +108,8 @@ constexpr float kClimbLpfHz = 2.0f;
 constexpr uint32_t kIbusStaleLoops = 40;
 
 // Compass staleness: a sample lands every ~7 ticks (~35 ms); no new sample for
-// this many ticks (200 ms) and PATH must not steer on the frozen heading.
+// this many ticks (200 ms) and PATH must not steer on frozen mag heading when
+// mag is the selected source below 5 m/s.
 constexpr uint32_t kMagStaleLoops = 40;
 
 // GPS staleness: NAV-PVT streams at ~10 Hz, so rx_bytes moves constantly.
@@ -119,9 +120,9 @@ constexpr uint32_t kGpsStaleLoops = 100;
 
 // Bluetooth dashboard link (USART2, see bt.cpp): host commands are serviced
 // every tick and a telemetry frame is pushed every Nth iteration (~5 Hz).
-// 5 Hz is what the 9600-baud BLE bridge carries: a frame is ~130 bytes
-// (135 ms on the wire), so 5 Hz uses ~68% of the line; 10 Hz would need
-// 1300 B/s against a 960 B/s ceiling and just overflows the TX ring.
+// 5 Hz is what the 9600-baud BLE bridge carries: a frame is 142 bytes
+// (148 ms on the wire), so 5 Hz uses ~74% of the line; 10 Hz would need
+// 1420 B/s against a 960 B/s ceiling and just overflows the TX ring.
 constexpr uint32_t kBtStreamEveryN = static_cast<uint32_t>(kLoopHz / 5.0f);
 
 // Busy-wait one SysTick period. No TICKINT/NVIC involved -- just polls
@@ -318,12 +319,18 @@ int main() {
         for (int i = 0; i < 3; ++i) s.gyro_dps[i] -= g_gyro_bias_dps[i];
         filter.update(s.accel_g[0], s.accel_g[1], s.accel_g[2],
                       s.gyro_dps[0], s.gyro_dps[1], dt_s);
-        // D-term rates: low-passed copies of the gyro (fixed cutoff, see
+        // D-term rates: roll uses body p directly, but pitch must use the
+        // Euler pitch rate theta_dot = q*cos(phi) - r*sin(phi), matching the
+        // angle regulated by P. Low-pass both (fixed cutoff, see
         // attitude_level::kRateLpfHz). Run every tick, in every mode, so the
         // state is warm when stabilize engages.
         attitude_level::Config lvl = attitude_level::snapshot();
+        constexpr float kDegToRad = 0.017453292519943295f;
+        float roll_rad = filter.roll_deg() * kDegToRad;
+        float pitch_euler_rate_dps = s.gyro_dps[1] * std::cos(roll_rad)
+                                   - s.gyro_dps[2] * std::sin(roll_rad);
         float roll_rate_d  = roll_rate_lpf.update(s.gyro_dps[0], attitude_level::kRateLpfHz, dt_s);
-        float pitch_rate_d = pitch_rate_lpf.update(s.gyro_dps[1], attitude_level::kRateLpfHz, dt_s);
+        float pitch_rate_d = pitch_rate_lpf.update(pitch_euler_rate_dps, attitude_level::kRateLpfHz, dt_s);
 
         g_telemetry.roll_deg  = filter.roll_deg();
         g_telemetry.pitch_deg = filter.pitch_deg();
@@ -435,13 +442,13 @@ int main() {
         int16_t rud  = stick_offset_us(ch[1]);
 
         // CH6 (Mode) > 1500 enables the angle loop (P on the filter angle, D on
-        // gyro rate): the elevator/rudder sticks become pitch/roll angle
-        // requests (see attitude_level.hpp) and replace the direct
-        // stick-to-surface path. A stale RX requests level. Invalid CH6 (0 / out of range) leaves
-        // the sticks passing straight through.
+        // the matching Euler angle rate): the elevator/rudder sticks become
+        // pitch/roll angle requests (see attitude_level.hpp) and replace the
+        // direct stick-to-surface path. A stale RX requests level. Invalid CH6
+        // (0 / out of range) leaves the sticks passing straight through.
         // CH6 is a 3-way: low (<= 1300) direct, mid stabilize, high (> 1700)
         // PATH on top of stabilize. PATH is silently ignored (plain stabilize)
-        // unless waypoints are loaded and GPS 3D fix, mag and RX are all live.
+        // unless waypoints, GPS, the selected heading source and RX are live.
         bool stabilize = ch[5] > 1300 && ch[5] <= 2100;
         bool path_sw = ch[5] > 1700 && ch[5] <= 2100;
         // The pilot-stick abort (path_mode::step) latches until the switch
@@ -452,21 +459,30 @@ int main() {
         // old bias -- the new one only commits after a quiet 1 s window.
         if (stabilize && !prev_stabilize) gyro_cal_start();
         prev_stabilize = stabilize;
+
+        // FC-wide true heading: magnetic heading + declination below 5 m/s,
+        // GPS course over ground at and above 5 m/s. GPS is polled later in
+        // the loop, so the latest published speed/course is one tick old.
+        path_mode::Config pcfg = path_snapshot();
+        bool use_mag_heading = g_telemetry.gps_speed_mps < 5.0f;
+        g_telemetry.heading_deg = g_telemetry.gps_course_deg;
+        if (use_mag_heading) {
+            g_telemetry.heading_deg = g_telemetry.mag_heading_deg
+                                    + path_mode::clampf(pcfg.declination_deg, -90.0f, 90.0f);
+        }
+
         if (stabilize) {
             // Pitch is the differential slot (`rud`, ch2); roll is the common
             // slot (`elev`, ch1) -- see the mix comment above.
             float pitch_req = rx_stale ? 0.0f : static_cast<float>(rud);
             float roll_req  = rx_stale ? 0.0f : static_cast<float>(elev);
             rud  = static_cast<int16_t>(attitude_level::pitch(lvl, pitch_req, filter.pitch_deg(), pitch_rate_d));
-            // GPS is polled later in the loop; the latest published fix is
-            // one tick old at most, which is fine for steering.
-            path_mode::Config pcfg = path_snapshot();
-            bool path_want = path_sw && path_mode::available(
-                pcfg, g_telemetry.gps_fix >= 3 && loops_since_gps < kGpsStaleLoops,
-                loops_since_mag < kMagStaleLoops, !rx_stale);
+            bool gps_ok = g_telemetry.gps_fix >= 3 && loops_since_gps < kGpsStaleLoops;
+            bool heading_ok = !use_mag_heading || loops_since_mag < kMagStaleLoops;
+            bool path_want = path_sw && path_mode::available(pcfg, gps_ok, heading_ok, !rx_stale);
             path_mode::Output po = path_mode::step(
                 g_path_state, pcfg, path_want, g_telemetry.gps_lat_e7, g_telemetry.gps_lon_e7,
-                g_telemetry.mag_heading_deg, roll_req, filter.roll_deg());
+                g_telemetry.heading_deg, roll_req, filter.roll_deg());
             if (g_path_state.engaged) {
                 // Bank request replaces the roll stick; pitch stays with the pilot.
                 elev = static_cast<int16_t>(attitude_level::roll_angle(

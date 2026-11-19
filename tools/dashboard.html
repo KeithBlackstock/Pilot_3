@@ -126,7 +126,7 @@
   <section class="card">
     <h2>Compass (QMC5883L)</h2>
     <div class="readouts">
-      <div class="readout"><div class="val" id="mag-hdg">–</div><div class="lbl">Mag heading</div></div>
+      <div class="readout"><div class="val" id="mag-hdg">–</div><div class="lbl">Heading</div></div>
     </div>
     <button id="btn-mag-cal" style="margin-top:12px">Compass Calibration</button>
     <button id="btn-mag-capture" disabled>Capture pose</button>
@@ -146,7 +146,8 @@
       <div>
         <button id="btn-wp-center">Center on aircraft</button>
         <button id="btn-wp-clear">Clear waypoints</button>
-        <div class="note" id="wp-note">Click the map to add a waypoint; drag to move; right-click a pin to delete.</div>
+        <button id="btn-wp-push">Push route to FC</button>
+        <div class="note" id="wp-note">Click the map to add a waypoint; drag to move; right-click a pin to delete. Push sends the route to the FC's RAM (flies immediately, lost on reboot); Compile &amp; Flash bakes it in permanently.</div>
         <div id="wp-list"></div>
       </div>
     </div>
@@ -442,7 +443,7 @@ function updateJob(m) {
   log.hidden = !m.log;
   log.textContent = m.log || "";
   log.scrollTop = log.scrollHeight;
-  ["btn-apply", "btn-reload", "btn-save", "btn-baro-zero"].forEach(id => { document.getElementById(id).disabled = busy; });
+  ["btn-apply", "btn-reload", "btn-save", "btn-baro-zero", "btn-wp-push"].forEach(id => { document.getElementById(id).disabled = busy; });
 }
 
 function updateLevelerState(ch) {
@@ -502,8 +503,7 @@ function captureBlackbox(m) {
   blackbox.lastSampleAt = now;
   blackbox.rows.push([
     ((now - blackbox.startedAt) / 1000).toFixed(3), m.seq,
-    m.pitch_deg, m.roll_deg,
-    (m.mag && m.mag.present) ? m.mag.heading_deg : "",
+    m.pitch_deg, m.roll_deg, m.heading_deg,
     m.speed3d_mps, m.baro_altitude_m,
   ]);
 }
@@ -551,8 +551,7 @@ function update(m) {
   drawHorizon(m.roll_deg, m.pitch_deg);
   document.getElementById("roll").innerHTML  = signedFmt(m.roll_deg, 2, "°");
   document.getElementById("pitch").innerHTML = signedFmt(m.pitch_deg, 2, "°");
-  document.getElementById("mag-hdg").innerHTML =
-    (m.mag && m.mag.present) ? fmt(m.mag.heading_deg, 1, "°") : "–";
+  document.getElementById("mag-hdg").innerHTML = fmt(m.heading_deg, 1, "°");
 
   document.getElementById("baro-t").innerHTML = signedFmt(m.baro_temp_c, 2, "°C");
   document.getElementById("baro-p").innerHTML = fmt(m.baro_pressure_pa / 100, 2, "hPa");
@@ -565,12 +564,7 @@ function update(m) {
     document.getElementById("gps-fix").innerHTML =
       `<span style="color:var(--${hasFix ? "ok" : "warn"})">${GPS_FIX[g.fix] || "type " + g.fix}</span>`;
     document.getElementById("gps-sats").textContent = g.sats;
-    if (hasFix) {
-      // Map cursor heading: live magnetometer when the module answered at
-      // boot, else GPS course-over-ground (meaningless below walking speed).
-      const hdg = (m.mag && m.mag.present) ? m.mag.heading_deg : g.course_deg;
-      updateAircraft(g.lat_deg, g.lon_deg, hdg);
-    }
+    if (hasFix) updateAircraft(g.lat_deg, g.lon_deg, m.heading_deg);
     document.getElementById("gps-lat").innerHTML = hasFix ? signedFmt(g.lat_deg, 7, "°") : "–";
     document.getElementById("gps-lon").innerHTML = hasFix ? signedFmt(g.lon_deg, 7, "°") : "–";
     document.getElementById("gps-alt").innerHTML = hasFix ? fmt(g.alt_m, 1, "m") : "–";
@@ -708,6 +702,11 @@ function initWaypoints() {
   wpMap.on("click", (e) => addWp(e.latlng));
   document.getElementById("btn-wp-center").onclick = () => { if (acMarker) wpMap.setView(acMarker.getLatLng(), Math.max(wpMap.getZoom(), 17)); };
   document.getElementById("btn-wp-clear").onclick = () => { clearWps(); renderWps(); };
+  document.getElementById("btn-wp-push").onclick = () => sendCmd({
+    cmd: "push_waypoints",
+    // RAM push: PATH flies this immediately, but it is lost on reboot.
+    waypoints: wps.map(w => { const p = w.marker.getLatLng(); return [p.lat, p.lng]; }),
+  });
 }
 initWaypoints();
 

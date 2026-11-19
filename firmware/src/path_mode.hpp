@@ -11,12 +11,12 @@
 // as plain stabilize. Nothing uploads waypoints yet (dashboard planner is
 // planning-only); until then the array can only be written over SWD.
 //
-// Heading is the QMC5883L magnetic heading (hard-iron/scale calibrated, with
-// mirrored-module correction -- see qmc5883.hpp) + declination_deg, which the
-// dashboard's compass calibration sets as the heading offset to true north.
-// The mag has no tilt compensation yet and its mounting orientation is not
-// bench-verified -- see telemetry.hpp. Heading is assumed clockwise-positive
-// from north, same as the bearing; verify on the bench before flight.
+// The caller supplies true heading: QMC5883L magnetic heading + declination_deg
+// below 5 m/s ground speed, and GPS course over ground at and above 5 m/s. The
+// dashboard's compass calibration sets declination_deg as the magnetic-to-true
+// heading offset. The mag has no tilt compensation yet and its mounting
+// orientation is not bench-verified -- see telemetry.hpp. Heading is assumed
+// clockwise-positive from north, same as the bearing; verify before flight.
 //
 // Roll sign: roll is right-wing-down positive (main.cpp), so a positive bank
 // request = right turn = heading increasing.
@@ -103,9 +103,10 @@ struct Output {
     bool finished;   // route complete: hold wings level
 };
 
-// Can PATH run right now? Needs waypoints, a 3D fix, a live mag and a live RX.
-inline bool available(const Config& c, bool gps_3d, bool mag_ok, bool rx_ok) {
-    return c.count > 0 && gps_3d && mag_ok && rx_ok;
+// Can PATH run right now? Needs waypoints, a 3D fix, a live heading and RX.
+// heading_ok must include mag freshness only when the caller selected mag.
+inline bool available(const Config& c, bool gps_3d, bool heading_ok, bool rx_ok) {
+    return c.count > 0 && gps_3d && heading_ok && rx_ok;
 }
 
 // Call every loop tick. `want` = switch high AND available(). A rising edge
@@ -114,7 +115,7 @@ inline bool available(const Config& c, bool gps_3d, bool mag_ok, bool rx_ok) {
 // header comment). `roll_deg` is the current bank (filter frame) for the TIP
 // check. Returns the bank request.
 inline Output step(State& st, const Config& c, bool want, int32_t lat_e7, int32_t lon_e7,
-                   float mag_heading_deg, float pilot_roll_us, float roll_deg) {
+                   float heading_deg, float pilot_roll_us, float roll_deg) {
     if (!want) {
         st.engaged = false;
         st.tip = false;
@@ -163,8 +164,7 @@ inline Output step(State& st, const Config& c, bool want, int32_t lat_e7, int32_
     }
     if (st.leg >= count) return {0.0f, true};  // end of route: wings level
 
-    float heading = mag_heading_deg + clampf(c.declination_deg, -90.0f, 90.0f);
-    float err = wrap180(bearing - heading);
+    float err = wrap180(bearing - heading_deg);
     float k = clampf(c.k_path, 0.0f, 5.0f);
     return {k * err, false};  // unclamped here: roll_angle() applies max_roll_deg
 }

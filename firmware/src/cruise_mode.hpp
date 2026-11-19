@@ -46,7 +46,7 @@ struct Config {
     float target_mps;      // 3-D speed setpoint (ground-relative)
 };
 
-constexpr Config kDefaults = {50.0f, 1100.0f, 1600.0f, 12.0f};  // CRUISE-DEFAULTS-LINE
+constexpr Config kDefaults = {50.0f, 1100.0f, 1700.0f, 12.0f};  // CRUISE-DEFAULTS-LINE
 
 constexpr float kMaxKp = 500.0f;
 constexpr float kMaxTargetMps = 40.0f;
