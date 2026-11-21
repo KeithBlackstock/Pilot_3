@@ -5,7 +5,7 @@
 // regs.hpp), fuses accel+gyro into roll/pitch with a complementary filter,
 // and publishes the result two ways: into a fixed SRAM address for
 // tools/pilot3_attitude_monitor.py to poll over OpenOCD telnet, and as a
-// framed stream on USART2 (bt.cpp) for the wireless Bluetooth dashboard.
+// framed stream on USART2 (bt.cpp) for the wireless WiFi dashboard.
 //
 // Assumes post-reset clocks (HSI 8 MHz, PCLK1 = 8 MHz), same as
 // pilot3_swd_probe.py -- no RCC_CFGR changes.
@@ -58,7 +58,7 @@ volatile float g_baro_ref_pa = 0.0f;
 volatile path_mode::Config g_path_config = {0, 0.5f, 10.0f, 47.9912f, {}, 100.0f, 40.0f};  // PATH-DEFAULTS-LINE
 
 // CRUISE speed-controller tunables, RAM (cruise_mode.hpp). Same dashboard
-// pattern as the leveler: applied live over SWD/BLE, and "save as defaults"
+// pattern as the leveler: applied live over SWD/WiFi, and "save as defaults"
 // rewrites CRUISE-DEFAULTS-LINE in cruise_mode.hpp.
 volatile cruise_mode::Config g_cruise_config = {
     cruise_mode::kDefaults.kp_us_per_mps, cruise_mode::kDefaults.min_throttle_us,
@@ -118,9 +118,9 @@ constexpr uint32_t kMagStaleLoops = 40;
 // mid-flight must fall back to plain stabilize).
 constexpr uint32_t kGpsStaleLoops = 100;
 
-// Bluetooth dashboard link (USART2, see bt.cpp): host commands are serviced
+// WiFi dashboard link (USART2, see bt.cpp): host commands are serviced
 // every tick and a telemetry frame is pushed every Nth iteration (~5 Hz).
-// 5 Hz is what the 9600-baud BLE bridge carries: a frame is 142 bytes
+// 5 Hz is what the 9600-baud WiFi bridge carries: a frame is 142 bytes
 // (148 ms on the wire), so 5 Hz uses ~74% of the line; 10 Hz would need
 // 1420 B/s against a 960 B/s ceiling and just overflows the TX ring.
 constexpr uint32_t kBtStreamEveryN = static_cast<uint32_t>(kLoopHz / 5.0f);
@@ -251,7 +251,7 @@ int main() {
     // ISR and decoded later in the main loop via gps::poll().
     gps::init();
 
-    // Bluetooth dashboard link on USART2 (CC41-A BLE clone, 9600 8N1).
+    // ESP-01S WiFi dashboard link on USART2 (9600 8N1).
     // RXNE/TXE interrupts only; if the module is absent this is a no-op.
     bt::init();
 
@@ -550,7 +550,7 @@ int main() {
         g_telemetry.seq = g_telemetry.seq + 1;
         loop_count++;
 
-        // Bluetooth dashboard link: execute at most one pending host
+        // WiFi dashboard link: execute at most one pending host
         // command (RD32/WR32) and push a telemetry frame at ~5 Hz. Both
         // are non-blocking -- a busy TX ring drops frames, it never stalls
         // the control loop.

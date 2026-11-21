@@ -29,7 +29,7 @@
 // min_throttle_us (a glide) until it returns or the pilot takes over.
 //
 // Tunables live in g_cruise_config (RAM, defined in main.cpp) so the
-// dashboard can change them live over SWD/BLE; they are re-read every loop
+// dashboard can change them live over SWD/WiFi; they are re-read every loop
 // tick and sanitized here, so a bad write can't drive the motor outside
 // [min, max]. kDefaults is what the firmware boots with -- the dashboard's
 // "save as defaults" rewrites that one line.

@@ -3,21 +3,17 @@ setlocal
 set OPENOCD_BIN=C:\Users\goats\AppData\Local\Microsoft\WinGet\Packages\xpack-dev-tools.openocd-xpack_Microsoft.Winget.Source_8wekyb3d8bbwe\xpack-openocd-0.12.0-7\bin
 set PYTHON=C:\Users\goats\AppData\Local\Programs\Python\Python313\python.exe
 
-REM BLE module (CC41-A) address -- connect-by-name would be nicer, but Windows
-REM discovery usually doesn't surface this clone's advertised name.
-set BT_TARGET=00:15:87:10:9E:53
-
 REM Unified dashboard launcher: asks which link to use.
 REM   1 = SWD: starts OpenOCD if needed, runs the dashboard, cleans up the
 REM       OpenOCD it started (needs the ST-Link attached).
-REM   2 = BLE via the CC41-A on the FC's USART2 (needs bleak).
+REM   2 = WiFi via ESP-01S transparent TCP (PC listens on port 8082).
 REM Assumes the firmware is already flashed (pilot3_fw_build_flash.bat).
 
 echo Pilot3 Dashboard
 echo   1 = SWD (ST-Link)
-echo   2 = BLE (CC41-A, %BT_TARGET%)
+echo   2 = WiFi (ESP-01S, TCP port 8082)
 choice /c 12 /n /m "Select link [1/2]: "
-if errorlevel 2 goto run_ble
+if errorlevel 2 goto run_wifi
 goto run_swd
 
 :run_swd
@@ -42,11 +38,11 @@ if defined STARTED_OPENOCD (
 pause
 exit /b 0
 
-:run_ble
-REM Compile & Flash still works from the page, but spawns OpenOCD on demand
-REM and needs the ST-Link attached at that moment.
+:run_wifi
+REM The ESP connects as a transparent TCP client; the PC listens on its
+REM SoftAP address 192.168.4.2, port 8082. No OpenOCD needed for telemetry.
 cd /d "%~dp0"
-"%PYTHON%" -u tools\pilot3_dashboard.py --ble %BT_TARGET%
+"%PYTHON%" -u tools\pilot3_dashboard.py --wifi
 echo.
 echo Dashboard exited.
 pause

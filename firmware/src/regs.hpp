@@ -127,7 +127,7 @@ constexpr uint32_t USART1_CR1_RE     = 1u << 2;
 constexpr uint32_t USART1_CR1_RXNEIE = 1u << 5;
 constexpr uint32_t USART1_CR1_UE     = 1u << 13;
 
-// ---- USART2 ---- (PA2=TX, Bluetooth dashboard link, see bt.cpp; PA3=RX)
+// ---- USART2 ---- (PA2=TX, ESP-01S WiFi dashboard link, see bt.cpp; PA3=RX)
 // USART2 is an APB1 peripheral (same bus as USART3). PA2 needs an AF
 // push-pull nibble in GPIOA_CRL (pins 0-7, far from the PA15 constraint);
 // PA3 (RX) needs no config: floating input is its reset state.

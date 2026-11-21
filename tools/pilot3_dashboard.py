@@ -2,22 +2,17 @@
 """Pilot_3 web dashboard -- a browser presentation of the Telemetry struct
 the firmware publishes.
 
-Three transports, selected by --ble / --serial:
+Three transports:
 
     default      poll the fixed SRAM struct over OpenOCD telnet (`mdw`, see
                  pilot3_attitude_monitor.py). Requires the ST-Link attached.
-    --ble        wireless (the supported module): consume the framed
-                 telemetry stream the firmware pushes on USART2
-                 (firmware/src/bt.cpp) through a CC41-A BLE clone's GATT
-                 serial characteristic (pilot3_ble_link.py, bleak).
-                 Dashboard commands ride the same link.
-    --serial     wireless (legacy SPP): same framed stream through a
-                 classic ZS-040 / HC-05 module's COM port
-                 (pilot3_serial_link.py). The module actually in use is a
-                 BLE-only clone, so this mode is for a swapped-in classic
-                 module.
-    In both wireless modes only Compile & Flash still spawns OpenOCD on
-    demand (no wireless flashing).
+    --serial     wireless legacy SPP: the same framed stream through a
+                 classic ZS-040 / HC-05 module's COM port.
+    --wifi       wireless ESP-01S: listen for the ESP's saved transparent
+                 TCP-client connection (pilot3_tcp_link.py, port 8082).
+    Dashboard commands ride the selected wireless link. In every wireless
+    mode only Compile & Flash still spawns OpenOCD on demand (no wireless
+    flashing).
 
 Either way the presentation is identical -- this script serves
 tools/dashboard.html over HTTP and pushes JSON snapshots to the page over a
@@ -48,6 +43,7 @@ from websockets.exceptions import ConnectionClosed
 from websockets.sync.server import serve
 
 import pilot3_fc_control as fc
+import pilot3_tcp_link as tcp
 from pilot3_attitude_monitor import NUM_CHANNELS, read_telemetry
 from pilot3_swd_probe import Ocd
 
@@ -55,11 +51,6 @@ try:
     import pilot3_serial_link as sl
 except ImportError:  # pyserial missing -- only --serial mode needs it
     sl = None
-
-try:
-    import pilot3_ble_link as bl
-except ImportError:  # bleak is guarded inside the module; guard anyway
-    bl = None
 
 PAGE_PATH = Path(__file__).resolve().parent / "dashboard.html"
 BLACKBOX_PATH = Path(__file__).resolve().parent.parent / "logs" / "pilot3_blackbox.csv"
@@ -247,8 +238,8 @@ def poll_loop(hub, host, port, hz, ctl, ocd_server):
 def telemetry_msg(f, last_seq):
     """Build the dashboard JSON from a decoded Telemetry tuple (the struct
     layout from pilot3_attitude_monitor.STRUCT_FMT). Shared by the OpenOCD
-    poll loop and the Bluetooth serial consumer so the page sees an
-    identical shape on either transport."""
+    poll loop and the wireless consumer so the page sees an identical shape
+    on either transport."""
     (seq, roll_deg, pitch_deg, baro_temp_c, baro_pressure_pa, baro_altitude_m,
      ibus_rx_bytes, ibus_frames_ok, ibus_frames_bad) = f[:9]
     ch = list(f[9:9 + NUM_CHANNELS])
@@ -291,9 +282,9 @@ def wireless_poll_loop(hub, connect, describe, hz, ctl):
     """Wireless variant of poll_loop: consumes the telemetry stream the
     firmware pushes on USART2 (see firmware/src/bt.cpp) and hands the live
     link to the Controller so dashboard commands ride the same transport.
-    connect() builds the link -- a SerialLink (SPP COM port) or a BleLink
-    (CC41-A BLE clone); describe names the transport for error messages.
-    Reconnects forever on failure, mirroring the OpenOCD loop."""
+    connect() builds a SerialLink (SPP COM port) or TcpLink (ESP-01S);
+    describe names the transport for error messages. Reconnects forever on
+    failure, mirroring the OpenOCD loop."""
     last_seq = None
     while True:
         if ctl.busy.is_set():
@@ -317,8 +308,8 @@ def wireless_poll_loop(hub, connect, describe, hz, ctl):
                 if t is None or age > 2.0:
                     hub.publish({"connected": False,
                                  "error": f"no telemetry from the FC on {describe} -- "
-                                          "is the FC powered with the BT firmware, and "
-                                          "the module on USART2?"})
+                                          "is the FC powered with the normal wireless firmware, "
+                                          "and the module on USART2?"})
                     time.sleep(0.5)
                     continue
                 msg = telemetry_msg(t, last_seq)
@@ -343,11 +334,10 @@ class Controller:
     background job at a time; telemetry polling pauses while it runs.
 
     Config commands run on self.link, which is an OcdLink (SWD mode) or the
-    live wireless link (a pilot3_serial_link.SerialLink or
-    pilot3_ble_link.BleLink, set/cleared by wireless_poll_loop, None while
-    the link is down) -- all implement read_words/write_word, so the fc.*
-    control functions work on any of them. Flashing always goes through
-    OpenOCD (no wireless flashing)."""
+    live wireless link (SerialLink or TcpLink, set/cleared by
+    wireless_poll_loop, None while the link is down) -- all implement
+    read_words/write_word, so the fc.* control functions work on any of them.
+    Flashing always goes through OpenOCD (no wireless flashing)."""
 
     def __init__(self, hub, host, port, ocd_server=None, wireless_mode=False):
         self.hub = hub
@@ -365,7 +355,7 @@ class Controller:
     def _require_link(self):
         if self.link is None:
             raise fc.ControlError(
-                "no live link to the FC yet -- waiting for Bluetooth telemetry")
+                "no live link to the FC yet -- waiting for wireless telemetry")
         return self.link
 
     def _get_flash_link(self):
@@ -696,13 +686,15 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--host", default="localhost", help="OpenOCD telnet host")
     ap.add_argument("--port", type=int, default=4444, help="OpenOCD telnet port")
-    ap.add_argument("--ble", metavar="NAME|ADDR", nargs="?", const="Pilot3",
-                    help="BLE dashboard via the CC41-A clone on USART2 -- connect by "
-                         "device name (default 'Pilot3') or MAC address; OpenOCD is "
-                         "then only used on demand by Compile & Flash")
     ap.add_argument("--serial", metavar="COMx",
                     help="legacy classic-SPP COM port (ZS-040 / HC-05 on USART2) -- "
                          "same wireless dashboard over a swapped-in classic module")
+    ap.add_argument("--wifi", action="store_true",
+                    help="ESP-01S WiFi: listen for its transparent TCP connection")
+    ap.add_argument("--wifi-listen", default="192.168.4.2",
+                    help="local address for --wifi (default: ESP SoftAP PC address)")
+    ap.add_argument("--wifi-port", type=int, default=8082,
+                    help="local TCP port for --wifi (default: 8082)")
     ap.add_argument("--baud", type=int, default=115200, help="--serial baud rate")
     ap.add_argument("--rate", type=float, default=10.0, help="telemetry polls per second")
     ap.add_argument("--http-port", type=int, default=8080)
@@ -712,18 +704,15 @@ def main():
                     help="never kill/respawn OpenOCD; just report link loss")
     args = ap.parse_args()
 
-    ble_mode = args.ble is not None
     serial_mode = args.serial is not None
-    if ble_mode and serial_mode:
-        print("--ble and --serial are alternatives; pick one")
-        return 2
-    if ble_mode and (bl is None or bl.BleakClient is None):
-        print("--ble needs bleak (pip install --user bleak)")
+    wifi_mode = args.wifi
+    if serial_mode and wifi_mode:
+        print("--serial and --wifi are alternatives; pick one")
         return 2
     if serial_mode and (sl is None or sl.serial is None):
         print("--serial needs pyserial (pip install pyserial)")
         return 2
-    wireless_mode = ble_mode or serial_mode
+    wireless_mode = serial_mode or wifi_mode
 
     hub = Hub()
     ocd_server = OcdServer(args.host, args.port, auto=not args.no_ocd_restart)
@@ -731,19 +720,17 @@ def main():
                      wireless_mode=wireless_mode)
 
     if wireless_mode:
-        # Wireless: no OpenOCD supervision. The Bluetooth link is the
-        # transport; OpenOCD is spawned on demand only if Compile & Flash
-        # is clicked (which needs the ST-Link attached).
-        if ble_mode:
-            target = args.ble
-            connect = lambda: bl.BleLink(target)  # noqa: E731
-            describe = f"BLE '{target}'"
-            transport = f"BLE {target} (CC41-A @ 9600)"
-        else:
+        # Wireless: no OpenOCD supervision. OpenOCD is spawned on demand only
+        # if Compile & Flash is clicked (which needs the ST-Link attached).
+        if serial_mode:
             port, baud = args.serial, args.baud
             connect = lambda: sl.SerialLink(port, baud)  # noqa: E731
             describe = f"COM port {port}"
-            transport = f"Bluetooth SPP {port} @ {baud}"
+            transport = f"Serial SPP {port} @ {baud}"
+        else:
+            connect = lambda: tcp.TcpLink(args.wifi_listen, args.wifi_port)  # noqa: E731
+            describe = f"ESP WiFi {args.wifi_listen}:{args.wifi_port}"
+            transport = f"ESP-01S TCP listener {args.wifi_listen}:{args.wifi_port}"
         threading.Thread(target=wireless_poll_loop,
                          args=(hub, connect, describe, args.rate, ctl),
                          daemon=True).start()

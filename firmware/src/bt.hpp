@@ -1,5 +1,5 @@
-// Bluetooth dashboard link (CC41-A BLE clone) on USART2, PA2=TX / PA3=RX,
-// 9600 8N1. See bt.cpp for the wire protocol.
+// ESP-01S WiFi dashboard link on USART2, PA2=TX / PA3=RX, 9600 8N1.
+// See bt.cpp for the wire protocol.
 #pragma once
 #include <cstdint>
 

@@ -8,9 +8,9 @@ volatile: a reset restores the firmware's compiled-in defaults.
 
 Everything except flash() is transport-agnostic: the functions take any link
 with read_words(addr, n)/write_word(addr, word) -- OcdLink (OpenOCD telnet,
-in this file), pilot3_ble_link.BleLink (CC41-A BLE) or
-pilot3_serial_link.SerialLink (legacy Bluetooth SPP). flash()
-needs OpenOCD by definition.
+in this file), pilot3_tcp_link.TcpLink (ESP-01S WiFi) or
+pilot3_serial_link.SerialLink (legacy serial). flash() needs OpenOCD by
+definition.
 """
 import re
 import socket
@@ -152,8 +152,8 @@ class OcdLink:
     # ---- word-level primitives ----
     # Same contract as pilot3_serial_link.SerialLink: every config function
     # below is written against these two, so it runs identically over SWD
-    # (OpenOCD) or the Bluetooth serial link. flash() is the only method
-    # that genuinely needs OpenOCD.
+    # (OpenOCD) or a wireless link. flash() is the only method that genuinely
+    # needs OpenOCD.
 
     def read_words(self, addr, n):
         """Read n 32-bit words at addr via mdw."""

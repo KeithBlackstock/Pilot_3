@@ -1,5 +1,5 @@
-// Bluetooth dashboard link (CC41-A BLE clone) on USART2 (PA2=TX, PA3=RX),
-// 9600 8N1. Carries the dashboard over the air: the Telemetry struct
+// ESP-01S WiFi dashboard link on USART2 (PA2=TX, PA3=RX), 9600 8N1.
+// Carries the dashboard over the air: the Telemetry struct
 // (telemetry.hpp) is streamed as framed packets, and the host can peek/poke
 // 32-bit SRAM words -- the same primitive the SWD dashboard uses over
 // OpenOCD (tools/pilot3_fc_control.py), so every dashboard control (leveler
@@ -291,10 +291,8 @@ void init() {
     mmio(GPIOA_CRL) = crl;
 
     // 9600 baud @ PCLK1 = 8 MHz (USART2 is on APB1, like USART3): BRR =
-    // 8 MHz / 9600 = 833.33 -> 0x341 (833, ~0.04% slow). Pinned to 9600
-    // because the CC41-A BLE clone's UART bridge is hard-locked to 9600 --
-    // it accepts AT+BAUD4 but the bridge never leaves 9600 (verified over
-    // the air: clean frames only when both ends run 9600).
+    // 8 MHz / 9600 = 833.33 -> 0x341 (833, ~0.04% slow). Matches the
+    // ESP-01S's saved AT+UART_DEF setting.
     mmio(USART2_BRR) = (52u << 4) | 1u;
     mmio(USART2_CR1) = USART2_CR1_UE | USART2_CR1_RE | USART2_CR1_TE | USART2_CR1_RXNEIE;
 

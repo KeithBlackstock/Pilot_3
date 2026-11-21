@@ -1,11 +1,11 @@
-"""Frame codec for the Pilot_3 Bluetooth link, plus the legacy classic-SPP link.
+"""Frame codec for the Pilot_3 wireless link, plus a legacy serial transport.
 
 Client side of the protocol implemented by firmware/src/bt.cpp (the
 constants and framing below mirror it exactly). The codec (encode_frame,
-FrameParser, constants) is shared with pilot3_ble_link.py, the supported
-CC41-A BLE transport. SerialLink is the legacy path for a classic SPP module
-(HC-05 etc.) presenting a plain COM port; it needs pyserial and a firmware
-build with USART2 at 115200 (the CC41-A bridge is locked to 9600).
+FrameParser, constants) is shared with pilot3_tcp_link.py, the ESP-01S WiFi
+transport. SerialLink is the legacy path for a classic SPP module (HC-05
+etc.) presenting a plain COM port; it needs pyserial and a matching USART2
+baud rate.
 
     0xA5 0x5A | type u8 | len u8 | payload[len] | crc16 lo | crc16 hi
     CRC16-CCITT (poly 0x1021, init 0xFFFF) over type..payload
@@ -17,7 +17,7 @@ build with USART2 at 115200 (the CC41-A bridge is locked to 9600).
 
 SerialLink exposes read_words()/write_word() with the same semantics as the
 word-level primitives on pilot3_fc_control.OcdLink, so the whole control
-layer (config, baro ref, mag cal, waypoints) works over Bluetooth unchanged.
+layer (config, baro ref, mag cal, waypoints) works over any framed transport.
 Telemetry frames are decoded with pilot3_attitude_monitor.STRUCT_FMT, the
 exact layout tools/pilot3_dashboard.py already consumes.
 
@@ -274,7 +274,7 @@ def _selftest():
     values = (42, 1.5, -2.5, 20.0, 101325.0, 15.5, 100, 50, 0) \
         + tuple(1000 + i for i in range(14)) + (1500, 1520) \
         + (479912345, -1223456789, 100.0, 12.5, 90.0, 999, 888, 0, 9, 3) \
-        + (10, -20, 30, 1, 123.5, 7000, 2) + (0.5, 12.75)  # float32-exact values only
+        + (10, -20, 30, 1, 123.5, 124.5, 7000, 2) + (0.5, 12.75)  # float32-exact values only
     payload = struct.pack(STRUCT_FMT, *values)
     got = p.feed(encode_frame(RSP_TELEMETRY, payload))
     assert got and got[0][0] == RSP_TELEMETRY
