@@ -117,7 +117,6 @@
     <div class="readouts" style="margin-top:12px">
       <div class="readout"><div class="val" id="gps-alt">–</div><div class="lbl">Altitude (MSL)</div></div>
       <div class="readout"><div class="val" id="gps-spd">–</div><div class="lbl">Ground speed</div></div>
-      <div class="readout"><div class="val" id="gps-spd3d">–</div><div class="lbl">3D speed</div></div>
       <div class="readout"><div class="val" id="gps-crs">–</div><div class="lbl">Course</div></div>
     </div>
     <div class="stats" id="gps-stats" style="margin-top:12px">–</div>
@@ -166,7 +165,7 @@
   <section class="card">
     <h2>Blackbox</h2>
     <button class="primary" id="btn-blackbox">Record 60 seconds</button>
-    <div class="note" id="blackbox-note">Captures pitch, roll, heading, 3-D speed, and barometric altitude to a CSV file.</div>
+    <div class="note" id="blackbox-note">Captures measured and target pitch/roll, heading, ground speed, and barometric altitude to a CSV file.</div>
   </section>
 
   <section class="card">
@@ -197,7 +196,7 @@
 
   <section class="card">
     <h2>Cruise mode (CH5)</h2>
-    <div class="stats" style="margin-bottom:8px">Holds the target 3-D speed with the motor (P on speed error, ground-relative).
+    <div class="stats" style="margin-bottom:8px">Holds the target ground speed with the motor (P on speed error, ground-relative).
       CH5 high engages immediately -- full power at standstill, so flip it only at the throw.
       State: <span class="modebadge" id="crz-state">–</span></div>
     <div class="cfg">
@@ -483,7 +482,7 @@ function finishBlackbox() {
     return;
   }
 
-  const header = ["elapsed_s", "seq", "pitch_deg", "roll_deg", "heading_deg", "speed3d_mps", "baro_altitude_m"];
+  const header = ["elapsed_s", "seq", "pitch_deg", "pitch_target_deg", "roll_deg", "roll_target_deg", "heading_deg", "ground_speed_mps", "baro_altitude_m"];
   const csv = [header, ...capture.rows].map(row => row.join(",")).join("\r\n") + "\r\n";
   const samples = capture.rows.length;
   const partial = capture.disconnected || capture.gaps;
@@ -501,10 +500,14 @@ function captureBlackbox(m) {
   if (blackbox.lastSampleAt !== null && now - blackbox.lastSampleAt > 1000) blackbox.gaps = true;
   blackbox.lastSeq = m.seq;
   blackbox.lastSampleAt = now;
+  // Direct mode has no angle target; leave those cells blank rather than
+  // confusing the firmware's direct-mode zero placeholder with level flight.
+  const attitudeActive = m.ibus_ch[5] > 1300 && m.ibus_ch[5] <= 2100;
   blackbox.rows.push([
     ((now - blackbox.startedAt) / 1000).toFixed(3), m.seq,
-    m.pitch_deg, m.roll_deg, m.heading_deg,
-    m.speed3d_mps, m.baro_altitude_m,
+    m.pitch_deg, attitudeActive ? m.pitch_target_deg : "",
+    m.roll_deg, attitudeActive ? m.roll_target_deg : "", m.heading_deg,
+    m.ground_speed_mps, m.baro_altitude_m,
   ]);
 }
 
@@ -569,7 +572,6 @@ function update(m) {
     document.getElementById("gps-lon").innerHTML = hasFix ? signedFmt(g.lon_deg, 7, "°") : "–";
     document.getElementById("gps-alt").innerHTML = hasFix ? fmt(g.alt_m, 1, "m") : "–";
     document.getElementById("gps-spd").innerHTML = hasFix ? fmt(g.speed_mps, 1, "m/s") : "–";
-    document.getElementById("gps-spd3d").innerHTML = hasFix ? fmt(m.speed3d_mps, 1, "m/s") : "–";
     document.getElementById("gps-crs").innerHTML = hasFix ? fmt(g.course_deg, 1, "°") : "–";
     document.getElementById("gps-stats").textContent =
       `rx ${g.rx_bytes} B   frames ok ${g.sentences_ok}   bad ${g.sentences_bad}` +

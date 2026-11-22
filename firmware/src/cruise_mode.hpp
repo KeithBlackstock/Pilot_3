@@ -13,10 +13,11 @@
 // but it means CH5-high on the ground is FULL POWER, not an idle. Flip it
 // only at launch, prop first.
 //
-// Feedback is the derived 3-D speed (speed3d_mps in telemetry.hpp: GPS
-// groundspeed + baro climb in quadrature). It is ground-relative, not
-// airspeed: in wind the loop holds constant ground speed and true airspeed
-// varies with it. No pitot or wind estimate on board, so that is inherent.
+// Feedback is GPS horizontal ground speed (ground_speed_mps in telemetry).
+// Barometric altitude and climb do not contribute. This is ground-relative,
+// not airspeed: in wind the loop holds constant ground speed and true
+// airspeed varies with it. No pitot or wind estimate on board, so that is
+// inherent.
 //
 // Control law: throttle_us = min_throttle_us + kp * (target_mps - speed),
 // clamped to [min_throttle_us, max_throttle_us]. P-only with a hard clamp:
@@ -43,7 +44,7 @@ struct Config {
     float kp_us_per_mps;   // throttle us per m/s of speed error
     float min_throttle_us; // lower clamp while engaged
     float max_throttle_us; // upper clamp while engaged
-    float target_mps;      // 3-D speed setpoint (ground-relative)
+    float target_mps;      // ground-speed setpoint
 };
 
 constexpr Config kDefaults = {50.0f, 1100.0f, 1700.0f, 12.0f};  // CRUISE-DEFAULTS-LINE

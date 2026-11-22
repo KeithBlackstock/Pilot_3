@@ -271,9 +271,12 @@ def telemetry_msg(f, last_seq):
                 "reads_ok": f[9 + NUM_CHANNELS + 2 + 16],
                 "errors": f[9 + NUM_CHANNELS + 2 + 17]},
         "heading_deg": f[9 + NUM_CHANNELS + 2 + 15],
-        # Derived pair appended after the mag block (2 floats, +18/+19).
+        # Derived pair appended after the mag block (2 floats, +18/+19),
+        # followed by the final attitude-loop targets (+20/+21).
         "baro_climb_mps": f[9 + NUM_CHANNELS + 2 + 18],
-        "speed3d_mps": f[9 + NUM_CHANNELS + 2 + 19],
+        "ground_speed_mps": f[9 + NUM_CHANNELS + 2 + 19],
+        "pitch_target_deg": f[9 + NUM_CHANNELS + 2 + 20],
+        "roll_target_deg": f[9 + NUM_CHANNELS + 2 + 21],
     }
 
 

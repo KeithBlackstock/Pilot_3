@@ -8,7 +8,7 @@ with `mdw`, and neither side blocks on the other.
 Requires the firmware already flashed and running, and OpenOCD already
 attached (pilot3_fw_build_flash.bat does both).
 
-Telemetry struct (see firmware/src/telemetry.hpp), 136 bytes at a fixed
+Telemetry struct (see firmware/src/telemetry.hpp), 144 bytes at a fixed
 SRAM address:
     uint32_t seq;
     float    roll_deg;
@@ -31,7 +31,9 @@ SRAM address:
     float    heading_deg;          (FC-wide mag/COG selection, true north)
     uint32_t mag_reads_ok, mag_errors;
     float    baro_climb_mps;       (differentiated baro altitude, low-passed)
-    float    speed3d_mps;          (GPS groundspeed + climb in quadrature)
+    float    ground_speed_mps;     (GPS horizontal ground speed)
+    float    pitch_target_deg;     (final attitude-loop request)
+    float    roll_target_deg;      (final attitude-loop request)
 """
 import argparse
 import re
@@ -46,9 +48,9 @@ from pilot3_swd_probe import Ocd  # reuse the probe's telnet/mdw client
 TELEMETRY_ADDR = 0x20000000
 NUM_CHANNELS = 14
 # seq, roll, pitch, baro x3, ibus x3, then channels + 2 pwm outputs (2B each),
-# and the derived climb + 3-D speed pair at the end.
-TELEMETRY_WORDS = 9 + (NUM_CHANNELS * 2 + 2 * 2) // 4 + 5 + 3 + 2 + 5 + 2
-STRUCT_FMT = f"<IfffffIII{NUM_CHANNELS}H2H" "2i3f3I2H" "4h2f2I" "2f"
+# with climb, ground speed and the pitch/roll target pairs at the end.
+TELEMETRY_WORDS = 9 + (NUM_CHANNELS * 2 + 2 * 2) // 4 + 5 + 3 + 2 + 5 + 2 + 2
+STRUCT_FMT = f"<IfffffIII{NUM_CHANNELS}H2H" "2i3f3I2H" "4h2f2I" "4f"
 # Anchor on the "0xADDR: " prefix OpenOCD's mdw response uses, same as the
 # probe script's read_word() -- a bare 8-hex-digit pattern would also match
 # the echoed command text ("mdw 0x20000000 16") and the address label itself.
@@ -101,7 +103,7 @@ def main():
             # heading and the read counters.
             (m_x, m_y, m_z, m_present, m_hdg, heading_deg, m_ok, m_err) = \
                 fields[9 + NUM_CHANNELS + 2 + 10:9 + NUM_CHANNELS + 2 + 18]
-            climb_mps, speed3d_mps = fields[9 + NUM_CHANNELS + 2 + 18:]
+            climb_mps, ground_speed_mps = fields[9 + NUM_CHANNELS + 2 + 18:9 + NUM_CHANNELS + 2 + 20]
             g_lat, g_lon = g_lat / 1e7, g_lon / 1e7
             stale = " (STALE -- seq unchanged, firmware not running?)" if seq == last_seq else ""
             ch_str = " ".join(f"{v:4d}" for v in ch)
@@ -111,7 +113,7 @@ def main():
                   f"pwm: S1={pwm_s1_us:4d}us S4={pwm_s4_us:4d}us  "
                   f"gps: fix={g_fix} sats={g_sats:2d} {g_lat:+10.6f},{g_lon:+11.6f} alt={g_alt:7.1f}m "
                   f"{g_spd:5.1f}m/s crs={g_crs:5.1f} {g_bytes}B ok={g_ok} bad={g_bad}  "
-                  f"climb={climb_mps:+5.1f}m/s spd3d={speed3d_mps:5.1f}m/s  hdg={heading_deg:5.1f}  "
+                  f"climb={climb_mps:+5.1f}m/s ground={ground_speed_mps:5.1f}m/s  hdg={heading_deg:5.1f}  "
                   f"mag: {'off' if not m_present else f'hdg={m_hdg:6.1f} xyz=({m_x},{m_y},{m_z}) ok={m_ok} err={m_err}'}"
                   f"{stale}   ",
                   end="", flush=True)

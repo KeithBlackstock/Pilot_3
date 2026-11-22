@@ -49,7 +49,7 @@ struct Config {
     float trim_pitch_us;  // pitch subtrim added after the loop, all modes (+ = nose up)
 };
 
-constexpr Config kDefaults = {3.0f, 2.0f, 0.3f, 0.2f, -1.0f, 1.0f, 60.0f, 40.0f, 30.0f, 250.0f, 5.0f, 30.0f};  // DEFAULTS-LINE
+constexpr Config kDefaults = {3.0f, 3.0f, 0.3f, 0.2f, -1.0f, 1.0f, 60.0f, 30.0f, 30.0f, 250.0f, 5.0f, 30.0f};  // DEFAULTS-LINE
 
 // Cutoff of the one-pole low-pass on the gyro rate fed to the D term (see
 // RateLpf). Deliberately not a live tunable: a mild fixed value (~4 ms of lag)
@@ -142,9 +142,11 @@ inline float soft_p(float kp, float err_deg) {
 }
 
 inline float track(const Config& c, float stick_offset_us, float angle_deg, float rate_dps,
-                   float max_angle_deg, float sign, float kp, float kd, float trim_deg) {
+                   float max_angle_deg, float sign, float kp, float kd, float trim_deg,
+                   float* target_deg = nullptr) {
     // Trim is a real angle (not scaled by sign) added to the stick's request.
     float request_deg = sign * stick_norm(c, stick_offset_us) * max_angle_deg + trim_deg;
+    if (target_deg) *target_deg = request_deg;
     float out = -sign * (soft_p(kp, angle_deg - request_deg) + kd * rate_dps);
     if (out > c.max_output_us) return c.max_output_us;
     if (out < -c.max_output_us) return -c.max_output_us;
@@ -154,21 +156,25 @@ inline float track(const Config& c, float stick_offset_us, float angle_deg, floa
 // Roll loop driven by an angle request (deg, filter frame: right wing down
 // positive) instead of a stick offset -- used by PATH. Same P-D law and
 // output limit as track(); the request is clamped to max_roll_deg.
-inline float roll_angle(const Config& c, float request_deg, float roll_deg, float roll_rate_dps) {
+inline float roll_angle(const Config& c, float request_deg, float roll_deg, float roll_rate_dps,
+                        float* target_deg = nullptr) {
     request_deg = clamp_range(request_deg, -c.max_roll_deg, c.max_roll_deg);
+    if (target_deg) *target_deg = request_deg;
     float out = -c.roll_sign * (soft_p(c.roll_kp, roll_deg - request_deg) + c.roll_kd * roll_rate_dps);
     if (out > c.max_output_us) return c.max_output_us;
     if (out < -c.max_output_us) return -c.max_output_us;
     return out;
 }
 
-inline float pitch(const Config& c, float stick_offset_us, float pitch_deg, float pitch_rate_dps) {
+inline float pitch(const Config& c, float stick_offset_us, float pitch_deg, float pitch_rate_dps,
+                   float* target_deg = nullptr) {
     return track(c, stick_offset_us, pitch_deg, pitch_rate_dps,
-                 c.max_pitch_deg, c.pitch_sign, c.pitch_kp, c.pitch_kd, c.trim_pitch_deg);
+                 c.max_pitch_deg, c.pitch_sign, c.pitch_kp, c.pitch_kd, c.trim_pitch_deg, target_deg);
 }
-inline float roll(const Config& c, float stick_offset_us, float roll_deg, float roll_rate_dps) {
+inline float roll(const Config& c, float stick_offset_us, float roll_deg, float roll_rate_dps,
+                  float* target_deg = nullptr) {
     return track(c, stick_offset_us, roll_deg, roll_rate_dps,
-                 c.max_roll_deg, c.roll_sign, c.roll_kp, c.roll_kd, 0.0f);
+                 c.max_roll_deg, c.roll_sign, c.roll_kp, c.roll_kd, 0.0f, target_deg);
 }
 
 }  // namespace attitude_level

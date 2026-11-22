@@ -96,9 +96,9 @@ constexpr uint32_t kBaroZeroReads = 20;      // ~2 s averaged for the boot zero
 constexpr float kBaroZeroSpreadPa = 30.0f;   // ~2.5 m; a noisier window is retried
 
 // Climb rate (baro altitude differentiated between completed readings,
-// ~10 Hz) is one-pole low-passed at this cutoff before it goes into
-// telemetry and the 3-D speed. A display quantity, not a control input, so
-// fixed like attitude_level::kRateLpfHz rather than a live tunable.
+// ~10 Hz) is one-pole low-passed at this cutoff before telemetry. It is a
+// display quantity, not a control input, so fixed like
+// attitude_level::kRateLpfHz rather than a live tunable.
 constexpr float kClimbLpfHz = 2.0f;
 
 // iBus staleness: if no new valid frame arrives for this many loop
@@ -290,9 +290,9 @@ int main() {
     uint32_t loop_count = 0;
     uint32_t baro_settle = 0, baro_n = 0;  // boot-time ground zero state
     float baro_sum = 0.0f, baro_first = 0.0f, baro_lo = 0.0f, baro_hi = 0.0f;
-    // Climb/3-D speed state: the published baro altitude differentiated
-    // across completed readings (dt accumulated from the measured loop
-    // period), then low-passed.
+    // Climb state: the published baro altitude differentiated across
+    // completed readings (dt accumulated from the measured loop period),
+    // then low-passed for telemetry/display only.
     attitude_level::RateLpf climb_lpf;
     float climb_mps = 0.0f;
     float prev_baro_alt_m = 0.0f, prev_baro_ref_pa = 0.0f, baro_dt_s = 0.0f;
@@ -383,13 +383,13 @@ int main() {
                 ? 44330.0f * (1.0f - std::pow(r.pressure_pa / ref_pa, 0.1903f))
                 : r.altitude_m;
             // Climb rate: differentiate the published altitude across
-            // completed readings, then low-pass. Raw baro noise is cm-scale,
-            // which a bare ~10 Hz derivative turns into ~1 m/s of jitter --
-            // harmless to the 3-D speed (groundspeed dominates the norm) but
-            // ugly on the climb readout. A reference change (the boot zero
-            // committing, or the dashboard's Altitude Calibration write)
-            // shifts the altitude basis by a constant: re-seed instead of
-            // letting that step show up as one huge false climb spike.
+            // completed readings, then low-pass for telemetry/display only.
+            // Raw baro noise is cm-scale, which a bare ~10 Hz derivative turns
+            // into ~1 m/s of jitter on the climb readout. A reference change
+            // (the boot zero committing, or the dashboard's Altitude
+            // Calibration write) shifts the altitude basis by a constant:
+            // re-seed instead of letting that step show up as one huge false
+            // climb spike.
             float alt_m = g_telemetry.baro_altitude_m;
             if (!prev_baro_alt_valid || ref_pa != prev_baro_ref_pa) {
                 prev_baro_alt_m = alt_m;
@@ -485,12 +485,14 @@ int main() {
             : g_telemetry.gps_course_deg;
         g_telemetry.heading_deg = wrap360(heading);
 
+        float pitch_target_deg = 0.0f, roll_target_deg = 0.0f;
         if (stabilize) {
             // Pitch is the differential slot (`rud`, ch2); roll is the common
             // slot (`elev`, ch1) -- see the mix comment above.
             float pitch_req = rx_stale ? 0.0f : static_cast<float>(rud);
             float roll_req  = rx_stale ? 0.0f : static_cast<float>(elev);
-            rud  = static_cast<int16_t>(attitude_level::pitch(lvl, pitch_req, filter.pitch_deg(), pitch_rate_d));
+            rud  = static_cast<int16_t>(attitude_level::pitch(
+                lvl, pitch_req, filter.pitch_deg(), pitch_rate_d, &pitch_target_deg));
             bool gps_ok = g_telemetry.gps_fix >= 3 && loops_since_gps < kGpsStaleLoops;
             bool heading_ok = !use_mag_heading || loops_since_mag < kMagStaleLoops;
             bool path_want = path_sw && path_mode::available(pcfg, gps_ok, heading_ok, !rx_stale);
@@ -500,17 +502,22 @@ int main() {
             if (g_path_state.engaged) {
                 // Bank request replaces the roll stick; pitch stays with the pilot.
                 elev = static_cast<int16_t>(attitude_level::roll_angle(
-                    lvl, po.bank_deg, filter.roll_deg(), roll_rate_d));
+                    lvl, po.bank_deg, filter.roll_deg(), roll_rate_d, &roll_target_deg));
             } else {
                 // Not steering: plain stabilize. Also the TIP case -- PATH
                 // suspended on excessive bank, this levels the wings until it
                 // resumes on the same leg.
-                elev = static_cast<int16_t>(attitude_level::roll(lvl, roll_req, filter.roll_deg(), roll_rate_d));
+                elev = static_cast<int16_t>(attitude_level::roll(
+                    lvl, roll_req, filter.roll_deg(), roll_rate_d, &roll_target_deg));
             }
         } else {
             g_path_state.engaged = false;
             g_path_state.tip = false;
         }
+        // Direct mode has no angle target; the zeroes are masked in blackbox
+        // by CH6. In stabilize/PATH these are the final angle-loop requests.
+        g_telemetry.pitch_target_deg = pitch_target_deg;
+        g_telemetry.roll_target_deg = roll_target_deg;
         // Pitch subtrim: a fixed offset on the pitch (differential) term after
         // the loop, so it also trims direct mode. + = nose up, i.e. the same
         // direction as a stick pull (which drives ch2 low, `rud` negative).
@@ -525,11 +532,11 @@ int main() {
         // cruise_mode.hpp; on the ground that means full power, so flip it
         // only at the throw. The fix/freshness values here are one tick old
         // (the GPS poll runs later in the loop), fine for a throttle
-        // decision. speed3d_mps is likewise last tick's published value.
+        // decision. ground_speed_mps is likewise last tick's published value.
         uint16_t throttle_us = cruise_mode::step(
             cruise_mode::snapshot(), ch[4] > 1500 && ch[4] <= 2100,
             g_telemetry.gps_fix >= 2 && loops_since_gps < kGpsStaleLoops,
-            g_telemetry.speed3d_mps, ch[2]);
+            g_telemetry.ground_speed_mps, ch[2]);
         servo_pwm::set_s2_motor_us(rx_stale ? 0 : throttle_us);
 
         gps::poll();
@@ -554,12 +561,9 @@ int main() {
         g_telemetry.gps_sats        = gf.sats;
         g_telemetry.gps_fix         = gf.fix;
 
-        // 3-D speed over ground: UBX gSpeed is the horizontal (2-D)
-        // magnitude, so the full 3-D magnitude just adds the vertical
-        // component in quadrature. Ground-relative -- with no wind estimate
-        // on board it equals airspeed only in still air. With no baro the
-        // climb term stays 0 and this is plain groundspeed.
-        g_telemetry.speed3d_mps = std::sqrt(gf.speed_mps * gf.speed_mps + climb_mps * climb_mps);
+        // UBX gSpeed is horizontal ground speed. Cruise uses it directly;
+        // barometric altitude and climb remain telemetry-only measurements.
+        g_telemetry.ground_speed_mps = gf.speed_mps;
 
         g_telemetry.seq = g_telemetry.seq + 1;
         loop_count++;

@@ -49,12 +49,16 @@ struct Telemetry {
     float heading_deg;
     uint32_t mag_reads_ok;
     uint32_t mag_errors;
-    // Derived in main.cpp: climb from differentiated baro altitude (one-pole
-    // low-passed, + = up) and the 3-D speed over ground -- GPS groundspeed
-    // (2-D) combined with climb in quadrature. Ground-relative, not
-    // airspeed: there is no wind estimate on board.
+    // Climb is differentiated baro altitude (one-pole low-passed, + = up),
+    // retained for display only. Ground speed is UBX gSpeed and is Cruise's
+    // sole speed feedback. Neither is airspeed: there is no wind estimate.
     float baro_climb_mps;
-    float speed3d_mps;
+    float ground_speed_mps;
+    // Final angle requests used by the attitude loop, after stick shaping,
+    // trim, PATH override and clamps. Both are zero in direct mode; consumers
+    // can use CH6 to distinguish that from a legitimate level request.
+    float pitch_target_deg;
+    float roll_target_deg;
 };
 
 // Layout is hand-mirrored in tools/pilot3_attitude_monitor.py's struct
@@ -64,7 +68,7 @@ struct Telemetry {
 static_assert(sizeof(Telemetry) == 4 + 4 * 5 + 4 * 3 + 2 * ibus::kNumChannels + 2 * 2
                                    + 4 * 5 + 4 * 3 + 2 * 2
                                    + 2 * 4 + 4 * 2 + 4 * 2
-                                   + 4 * 2,
+                                   + 4 * 4,
               "Telemetry layout changed -- update pilot3_attitude_monitor.py's struct format too");
 
 // Fixed SRAM address: must match kTelemetryAddr in
