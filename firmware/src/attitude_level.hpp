@@ -1,17 +1,18 @@
 // Angle-command loop for pitch and roll: P on the angle error (with a soft
-// center: gain ramps up with error, see soft_p) plus D on the corresponding
-// Euler angle rate. Stateless (no integrator, no filter state). The P term uses
-// the complementary-filter angle (gyro-led short term, so brief linear
-// accelerations from launch/throttle/vibration are mostly rejected); the D term
-// simply opposes angular velocity (it wants 0 deg/s), so there are no rate
-// limits and no cascade -- the two terms just act together on the surface offset.
+// center: gain ramps up with error, see soft_p), D on the corresponding Euler
+// angle rate, plus additive raw-stick feedforward. Stateless (no integrator,
+// no filter state). The P term uses the complementary-filter angle (gyro-led
+// short term, so brief linear accelerations from launch/throttle/vibration are
+// mostly rejected); D opposes angular velocity; FF provides immediate stick
+// response. The combined output has one authority clamp, with no rate limits
+// or cascaded loops.
 //
 // The pilot's sticks are angle requests: full CH2 deflection (the pitch stick,
 // differential slot) asks for +-max_pitch_deg, full CH1 (common slot) for
-// +-max_roll_deg, centered sticks ask for level.
-// The loop outputs a surface offset that drives the measured angle toward the
-// requested one. (Outside stabilize mode the sticks bypass this entirely.)
-// Kd defaults to a small value (0.1 us per deg/s); tune it from the dashboard.
+// +-max_roll_deg, centered sticks ask for level. FF independently adds
+// ff * normalized_stick * 500 us on each axis (default 0.2 = 100 us at full
+// stick). PATH's roll-angle override omits FF. Outside stabilize mode the
+// sticks bypass the loop entirely. All gains are dashboard-tunable.
 //
 // V-tail: pitch is the differential S1/S4 term (ch2), roll is the common term
 // (ch1) -- see the mix comment in main.cpp (3CH: yaw induces roll).
@@ -19,10 +20,11 @@
 // Signs are bench-verified on the airframe (roll is right-wing-down positive
 // after the axis fix in main.cpp): a surface offset u moves the angle in the direction of
 // `sign * u`, so the request for a stick offset s is `sign * s_norm * max`
-// and the output is -sign * (kp * (angle - request) + kd * rate) -- a stick
-// pushed the way it would push the surface asks for the angle that surface
-// would produce. The gyro rate shares the angle's sign convention (the
-// complementary filter integrates it into the angle).
+// and the P-D output is -sign * (kp * (angle - request) + kd * rate). FF is
+// then added as ff * s_norm * 500 us without another sign multiplication.
+// A stick pushed the way it would push the surface asks for the angle that
+// surface would produce. The gyro rate shares the angle's sign convention
+// (the complementary filter integrates it into the angle).
 //
 // Tunables live in g_attitude_config (RAM, defined in main.cpp) so the
 // dashboard can change them live over SWD; they are re-read every loop tick
@@ -37,19 +39,21 @@ namespace attitude_level {
 struct Config {
     float pitch_kp;       // us of surface per degree of angle error
     float roll_kp;
-    float pitch_kd;       // us of surface per deg/s of gyro rate (damping)
+    float pitch_kd;       // us of surface per deg/s of Euler rate (damping)
     float roll_kd;
+    float pitch_ff;       // fraction of normalized raw stick added to P-D output
+    float roll_ff;
     float pitch_sign;     // only the sign matters (<0 inverts)
     float roll_sign;
     float max_pitch_deg;  // angle requested at full pitch stick (ch2)
     float max_roll_deg;   // angle requested at full roll stick (ch1)
     float deadband_us;    // stick offset (us) around center that requests level
-    float max_output_us;  // authority limit (gentle)
+    float max_output_us;  // authority limit on the combined P-D + FF output
     float trim_pitch_deg; // pitch angle held with centered sticks (+ = nose up)
     float trim_pitch_us;  // pitch subtrim added after the loop, all modes (+ = nose up)
 };
 
-constexpr Config kDefaults = {3.0f, 3.0f, 0.3f, 0.2f, -1.0f, 1.0f, 60.0f, 30.0f, 30.0f, 250.0f, 5.0f, 30.0f};  // DEFAULTS-LINE
+constexpr Config kDefaults = {3.0f, 3.0f, 0.2f, 0.2f, 0.1f, 0.1f, -1.0f, 1.0f, 40.0f, 30.0f, 30.0f, 250.0f, 5.0f, 40.0f};  // DEFAULTS-LINE
 
 // Cutoff of the one-pole low-pass on the gyro rate fed to the D term (see
 // RateLpf). Deliberately not a live tunable: a mild fixed value (~4 ms of lag)
@@ -63,6 +67,7 @@ constexpr float kSoftCenterDeg = 5.0f;
 
 constexpr float kMaxKp = 20.0f;
 constexpr float kMaxKd = 5.0f;
+constexpr float kMaxFf = 1.0f;
 constexpr float kMaxAngleDeg = 60.0f;
 constexpr float kMaxDeadbandUs = 200.0f;
 constexpr float kStickFullUs = 500.0f;  // full stick deflection from center
@@ -88,6 +93,8 @@ inline Config snapshot() {
     c.roll_kp       = clamp_range(g_attitude_config.roll_kp, 0.0f, kMaxKp);
     c.pitch_kd      = clamp_range(g_attitude_config.pitch_kd, 0.0f, kMaxKd);
     c.roll_kd       = clamp_range(g_attitude_config.roll_kd, 0.0f, kMaxKd);
+    c.pitch_ff      = clamp_range(g_attitude_config.pitch_ff, 0.0f, kMaxFf);
+    c.roll_ff       = clamp_range(g_attitude_config.roll_ff, 0.0f, kMaxFf);
     c.pitch_sign    = g_attitude_config.pitch_sign < 0.0f ? -1.0f : 1.0f;
     c.roll_sign     = g_attitude_config.roll_sign < 0.0f ? -1.0f : 1.0f;
     c.max_pitch_deg = clamp_range(g_attitude_config.max_pitch_deg, 0.0f, kMaxAngleDeg);
@@ -142,12 +149,16 @@ inline float soft_p(float kp, float err_deg) {
 }
 
 inline float track(const Config& c, float stick_offset_us, float angle_deg, float rate_dps,
-                   float max_angle_deg, float sign, float kp, float kd, float trim_deg,
+                   float max_angle_deg, float sign, float kp, float kd, float ff, float trim_deg,
                    float* target_deg = nullptr) {
+    float stick = stick_norm(c, stick_offset_us);
     // Trim is a real angle (not scaled by sign) added to the stick's request.
-    float request_deg = sign * stick_norm(c, stick_offset_us) * max_angle_deg + trim_deg;
+    float request_deg = sign * stick * max_angle_deg + trim_deg;
     if (target_deg) *target_deg = request_deg;
-    float out = -sign * (soft_p(kp, angle_deg - request_deg) + kd * rate_dps);
+    // FF is direct stick pass-through, so unlike the angle request and P-D
+    // terms it needs no sign multiplication. Clamp the combined output.
+    float out = -sign * (soft_p(kp, angle_deg - request_deg) + kd * rate_dps)
+              + ff * stick * kStickFullUs;
     if (out > c.max_output_us) return c.max_output_us;
     if (out < -c.max_output_us) return -c.max_output_us;
     return out;
@@ -155,7 +166,8 @@ inline float track(const Config& c, float stick_offset_us, float angle_deg, floa
 
 // Roll loop driven by an angle request (deg, filter frame: right wing down
 // positive) instead of a stick offset -- used by PATH. Same P-D law and
-// output limit as track(); the request is clamped to max_roll_deg.
+// output limit as track(), but deliberately no raw-stick FF; the request is
+// clamped to max_roll_deg.
 inline float roll_angle(const Config& c, float request_deg, float roll_deg, float roll_rate_dps,
                         float* target_deg = nullptr) {
     request_deg = clamp_range(request_deg, -c.max_roll_deg, c.max_roll_deg);
@@ -169,12 +181,13 @@ inline float roll_angle(const Config& c, float request_deg, float roll_deg, floa
 inline float pitch(const Config& c, float stick_offset_us, float pitch_deg, float pitch_rate_dps,
                    float* target_deg = nullptr) {
     return track(c, stick_offset_us, pitch_deg, pitch_rate_dps,
-                 c.max_pitch_deg, c.pitch_sign, c.pitch_kp, c.pitch_kd, c.trim_pitch_deg, target_deg);
+                 c.max_pitch_deg, c.pitch_sign, c.pitch_kp, c.pitch_kd, c.pitch_ff,
+                 c.trim_pitch_deg, target_deg);
 }
 inline float roll(const Config& c, float stick_offset_us, float roll_deg, float roll_rate_dps,
                   float* target_deg = nullptr) {
     return track(c, stick_offset_us, roll_deg, roll_rate_dps,
-                 c.max_roll_deg, c.roll_sign, c.roll_kp, c.roll_kd, 0.0f, target_deg);
+                 c.max_roll_deg, c.roll_sign, c.roll_kp, c.roll_kd, c.roll_ff, 0.0f, target_deg);
 }
 
 }  // namespace attitude_level

@@ -41,6 +41,7 @@ volatile Telemetry g_telemetry __attribute__((section(".telemetry"))) = {};
 volatile attitude_level::Config g_attitude_config = {
     attitude_level::kDefaults.pitch_kp,    attitude_level::kDefaults.roll_kp,
     attitude_level::kDefaults.pitch_kd,    attitude_level::kDefaults.roll_kd,
+    attitude_level::kDefaults.pitch_ff,    attitude_level::kDefaults.roll_ff,
     attitude_level::kDefaults.pitch_sign,  attitude_level::kDefaults.roll_sign,
     attitude_level::kDefaults.max_pitch_deg, attitude_level::kDefaults.max_roll_deg,
     attitude_level::kDefaults.deadband_us, attitude_level::kDefaults.max_output_us,
@@ -333,17 +334,20 @@ int main() {
         for (int i = 0; i < 3; ++i) s.gyro_dps[i] -= g_gyro_bias_dps[i];
         filter.update(s.accel_g[0], s.accel_g[1], s.accel_g[2],
                       s.gyro_dps[0], s.gyro_dps[1], dt_s);
-        // D-term rates: roll uses body p directly, but pitch must use the
-        // Euler pitch rate theta_dot = q*cos(phi) - r*sin(phi), matching the
-        // angle regulated by P. Low-pass both (fixed cutoff, see
-        // attitude_level::kRateLpfHz). Run every tick, in every mode, so the
-        // state is warm when stabilize engages.
+        // D-term rates: use the Euler roll/pitch rates, matching the angles
+        // regulated by P, rather than raw body p/q. Low-pass both (fixed
+        // cutoff, see attitude_level::kRateLpfHz). Run every tick, in every
+        // mode, so the state is warm when stabilize engages.
         attitude_level::Config lvl = attitude_level::snapshot();
         constexpr float kDegToRad = 0.017453292519943295f;
         float roll_rad = filter.roll_deg() * kDegToRad;
-        float pitch_euler_rate_dps = s.gyro_dps[1] * std::cos(roll_rad)
-                                   - s.gyro_dps[2] * std::sin(roll_rad);
-        float roll_rate_d  = roll_rate_lpf.update(s.gyro_dps[0], attitude_level::kRateLpfHz, dt_s);
+        float pitch_rad = filter.pitch_deg() * kDegToRad;
+        float sin_roll = std::sin(roll_rad), cos_roll = std::cos(roll_rad);
+        float roll_euler_rate_dps = s.gyro_dps[0]
+            + (s.gyro_dps[1] * sin_roll + s.gyro_dps[2] * cos_roll) * std::tan(pitch_rad);
+        float pitch_euler_rate_dps = s.gyro_dps[1] * cos_roll
+                                   - s.gyro_dps[2] * sin_roll;
+        float roll_rate_d  = roll_rate_lpf.update(roll_euler_rate_dps, attitude_level::kRateLpfHz, dt_s);
         float pitch_rate_d = pitch_rate_lpf.update(pitch_euler_rate_dps, attitude_level::kRateLpfHz, dt_s);
 
         g_telemetry.roll_deg  = filter.roll_deg();

@@ -27,12 +27,13 @@ HEADER = FIRMWARE / "src" / "attitude_level.hpp"
 NM = Path(r"C:\Program Files (x86)\GNU Arm Embedded Toolchain\10 2021.10\bin\arm-none-eabi-nm.exe")
 
 # Field order/limits mirror attitude_level::Config and its sanitizer.
-FIELDS = ("pitch_kp", "roll_kp", "pitch_kd", "roll_kd", "pitch_sign", "roll_sign",
-          "max_pitch_deg", "max_roll_deg", "deadband_us", "max_output_us",
-          "trim_pitch_deg", "trim_pitch_us")
+FIELDS = ("pitch_kp", "roll_kp", "pitch_kd", "roll_kd", "pitch_ff", "roll_ff",
+          "pitch_sign", "roll_sign", "max_pitch_deg", "max_roll_deg", "deadband_us",
+          "max_output_us", "trim_pitch_deg", "trim_pitch_us")
 LIMITS = {
     "pitch_kp": (0.0, 20.0), "roll_kp": (0.0, 20.0),
     "pitch_kd": (0.0, 5.0), "roll_kd": (0.0, 5.0),
+    "pitch_ff": (0.0, 1.0), "roll_ff": (0.0, 1.0),
     "pitch_sign": (-1.0, 1.0), "roll_sign": (-1.0, 1.0),
     "max_pitch_deg": (0.0, 60.0), "max_roll_deg": (0.0, 60.0),
     "deadband_us": (0.0, 200.0), "max_output_us": (0.0, 500.0),
