@@ -105,7 +105,7 @@ The side-firmware and AT setup used to configure the ESP without a USB-TTL adapt
 ## Layout
 
 - `firmware/` - firmware source (`src/`), linker script, startup, `build.bat` (Windows) and `Makefile`
-- `tools/` - OpenOCD-based telemetry monitor, web dashboard, and wireless links (`pilot3_serial_link.py` for classic SPP, `pilot3_tcp_link.py` for ESP-01S WiFi)
+- `tools/` - OpenOCD-based telemetry monitor, web dashboard, and wireless link (`pilot3_tcp_link.py` for ESP-01S WiFi, using the frame codec in `pilot3_serial_link.py`)
 - `pilot3.bat` - unified dashboard launcher (prompts: 1 = SWD, 2 = WiFi)
 - `Misc Connections/` - temporary ESP-01S AT setup bridge and configuration notes
 - `circuit_reference/` - board schematic (KiCanvas) and netlist

@@ -2,17 +2,14 @@
 """Pilot_3 web dashboard -- a browser presentation of the Telemetry struct
 the firmware publishes.
 
-Three transports:
+Two transports:
 
     default      poll the fixed SRAM struct over OpenOCD telnet (`mdw`, see
                  pilot3_attitude_monitor.py). Requires the ST-Link attached.
-    --serial     wireless legacy SPP: the same framed stream through a
-                 classic ZS-040 / HC-05 module's COM port.
     --wifi       wireless ESP-01S: listen for the ESP's saved transparent
                  TCP-client connection (pilot3_tcp_link.py, port 8082).
-    Dashboard commands ride the selected wireless link. In every wireless
-    mode only Compile & Flash still spawns OpenOCD on demand (no wireless
-    flashing).
+    In WiFi mode dashboard commands ride the wireless link; only Compile &
+    Flash still spawns OpenOCD on demand (no wireless flashing).
 
 Either way the presentation is identical -- this script serves
 tools/dashboard.html over HTTP and pushes JSON snapshots to the page over a
@@ -46,11 +43,6 @@ import pilot3_fc_control as fc
 import pilot3_tcp_link as tcp
 from pilot3_attitude_monitor import NUM_CHANNELS, read_telemetry
 from pilot3_swd_probe import Ocd
-
-try:
-    import pilot3_serial_link as sl
-except ImportError:  # pyserial missing -- only --serial mode needs it
-    sl = None
 
 PAGE_PATH = Path(__file__).resolve().parent / "dashboard.html"
 BLACKBOX_PATH = Path(__file__).resolve().parent.parent / "logs" / "pilot3_blackbox.csv"
@@ -288,7 +280,7 @@ def wireless_poll_loop(hub, connect, describe, hz, ctl):
     """Wireless variant of poll_loop: consumes the telemetry stream the
     firmware pushes on USART2 (see firmware/src/bt.cpp) and hands the live
     link to the Controller so dashboard commands ride the same transport.
-    connect() builds a SerialLink (SPP COM port) or TcpLink (ESP-01S);
+    connect() builds a TcpLink (ESP-01S WiFi);
     describe names the transport for error messages. Reconnects forever on
     failure, mirroring the OpenOCD loop."""
     last_seq = None
@@ -340,7 +332,7 @@ class Controller:
     background job at a time; telemetry polling pauses while it runs.
 
     Config commands run on self.link, which is an OcdLink (SWD mode) or the
-    live wireless link (SerialLink or TcpLink, set/cleared by
+    live wireless link (TcpLink, set/cleared by
     wireless_poll_loop, None while the link is down) -- all implement
     read_words/write_word, so the fc.* control functions work on any of them.
     Flashing always goes through OpenOCD (no wireless flashing)."""
@@ -692,16 +684,12 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--host", default="localhost", help="OpenOCD telnet host")
     ap.add_argument("--port", type=int, default=4444, help="OpenOCD telnet port")
-    ap.add_argument("--serial", metavar="COMx",
-                    help="legacy classic-SPP COM port (ZS-040 / HC-05 on USART2) -- "
-                         "same wireless dashboard over a swapped-in classic module")
     ap.add_argument("--wifi", action="store_true",
                     help="ESP-01S WiFi: listen for its transparent TCP connection")
     ap.add_argument("--wifi-listen", default="192.168.4.2",
                     help="local address for --wifi (default: ESP SoftAP PC address)")
     ap.add_argument("--wifi-port", type=int, default=8082,
                     help="local TCP port for --wifi (default: 8082)")
-    ap.add_argument("--baud", type=int, default=115200, help="--serial baud rate")
     ap.add_argument("--rate", type=float, default=10.0, help="telemetry polls per second")
     ap.add_argument("--http-port", type=int, default=8080)
     ap.add_argument("--ws-port", type=int, default=8081)
@@ -710,15 +698,7 @@ def main():
                     help="never kill/respawn OpenOCD; just report link loss")
     args = ap.parse_args()
 
-    serial_mode = args.serial is not None
-    wifi_mode = args.wifi
-    if serial_mode and wifi_mode:
-        print("--serial and --wifi are alternatives; pick one")
-        return 2
-    if serial_mode and (sl is None or sl.serial is None):
-        print("--serial needs pyserial (pip install pyserial)")
-        return 2
-    wireless_mode = serial_mode or wifi_mode
+    wireless_mode = args.wifi
 
     hub = Hub()
     ocd_server = OcdServer(args.host, args.port, auto=not args.no_ocd_restart)
@@ -728,15 +708,9 @@ def main():
     if wireless_mode:
         # Wireless: no OpenOCD supervision. OpenOCD is spawned on demand only
         # if Compile & Flash is clicked (which needs the ST-Link attached).
-        if serial_mode:
-            port, baud = args.serial, args.baud
-            connect = lambda: sl.SerialLink(port, baud)  # noqa: E731
-            describe = f"COM port {port}"
-            transport = f"Serial SPP {port} @ {baud}"
-        else:
-            connect = lambda: tcp.TcpLink(args.wifi_listen, args.wifi_port)  # noqa: E731
-            describe = f"ESP WiFi {args.wifi_listen}:{args.wifi_port}"
-            transport = f"ESP-01S TCP listener {args.wifi_listen}:{args.wifi_port}"
+        connect = lambda: tcp.TcpLink(args.wifi_listen, args.wifi_port)  # noqa: E731
+        describe = f"ESP WiFi {args.wifi_listen}:{args.wifi_port}"
+        transport = f"ESP-01S TCP listener {args.wifi_listen}:{args.wifi_port}"
         threading.Thread(target=wireless_poll_loop,
                          args=(hub, connect, describe, args.rate, ctl),
                          daemon=True).start()

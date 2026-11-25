@@ -2,7 +2,8 @@
 """TCP listener transport for an ESP-01S running UART-WiFi passthrough.
 
 The PC listens; the ESP connects as a TCP client. Once connected, the byte
-stream and control contract are identical to pilot3_serial_link.SerialLink.
+stream is the framed protocol in pilot3_serial_link.py (shared codec), and
+the control contract (read_words/write_word) matches pilot3_fc_control.OcdLink.
 No third-party packages are required. Run directly for a loopback self-test.
 """
 import socket
@@ -19,7 +20,7 @@ from pilot3_attitude_monitor import STRUCT_FMT
 
 
 class TcpLink:
-    """One accepted TCP connection with SerialLink's dashboard interface."""
+    """One accepted TCP connection exposing the dashboard link interface."""
 
     def __init__(self, listen_host="0.0.0.0", port=8082, timeout=1.0,
                  accept_timeout=2.0):

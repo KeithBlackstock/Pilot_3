@@ -8,9 +8,8 @@ volatile: a reset restores the firmware's compiled-in defaults.
 
 Everything except flash() is transport-agnostic: the functions take any link
 with read_words(addr, n)/write_word(addr, word) -- OcdLink (OpenOCD telnet,
-in this file), pilot3_tcp_link.TcpLink (ESP-01S WiFi) or
-pilot3_serial_link.SerialLink (legacy serial). flash() needs OpenOCD by
-definition.
+in this file) or pilot3_tcp_link.TcpLink (ESP-01S WiFi). flash() needs
+OpenOCD by definition.
 """
 import re
 import socket
@@ -151,7 +150,7 @@ class OcdLink:
                 raise
 
     # ---- word-level primitives ----
-    # Same contract as pilot3_serial_link.SerialLink: every config function
+    # Same contract as pilot3_tcp_link.TcpLink: every config function
     # below is written against these two, so it runs identically over SWD
     # (OpenOCD) or a wireless link. flash() is the only method that genuinely
     # needs OpenOCD.
@@ -179,7 +178,7 @@ class OcdLink:
 
 
 # ---- config (transport-agnostic) ----
-# These take the link explicitly (OcdLink or pilot3_serial_link.SerialLink --
+# These take the link explicitly (OcdLink or pilot3_tcp_link.TcpLink --
 # anything with read_words/write_word), like the mag-cal functions below.
 
 def read_config(link):
