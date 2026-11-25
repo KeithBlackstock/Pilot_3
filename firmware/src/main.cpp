@@ -113,10 +113,11 @@ constexpr uint32_t kIbusStaleLoops = 40;
 // mag is the selected source below 5 m/s.
 constexpr uint32_t kMagStaleLoops = 40;
 
-// GPS staleness: NAV-PVT streams at ~10 Hz, so rx_bytes moves constantly.
-// No new bytes for this many ticks (500 ms) and the published fix/position
-// is a frozen lifetime value that PATH must not steer on (cable pulled
-// mid-flight must fall back to plain stabilize).
+// GPS staleness: NAV-PVT streams at ~10 Hz. No new checksum-valid PVT frame
+// for this many ticks (500 ms) and the published fix/position is a frozen
+// value that PATH must not steer on (cable pulled mid-flight, or bytes still
+// arriving but corrupt/out of sync, must fall back to plain stabilize).
+// Keyed on sentences_ok, not rx_bytes: garbage bytes must not count as fresh.
 constexpr uint32_t kGpsStaleLoops = 100;
 
 // WiFi dashboard link (USART2, see bt.cpp): host commands are serviced
@@ -303,8 +304,8 @@ int main() {
     uint32_t last_frames_ok = 0;
     uint32_t loops_since_frame = kIbusStaleLoops;  // start stale until a frame arrives
     uint32_t loops_since_mag = kMagStaleLoops;     // start stale until a sample arrives
-    uint32_t loops_since_gps = kGpsStaleLoops;     // start stale until a byte arrives
-    uint32_t last_gps_bytes = 0;
+    uint32_t loops_since_gps = kGpsStaleLoops;     // start stale until a valid PVT arrives
+    uint32_t last_gps_frames = 0;
     bool prev_stabilize = false;
 
     while (true) {
@@ -546,9 +547,9 @@ int main() {
         gps::poll();
         gps::Stats gps_stats = gps::snapshot();
         // Freshness tracking for PATH (used next tick, same as the published
-        // fix): rx_bytes only moves while the module is actually streaming.
-        if (gps_stats.rx_bytes != last_gps_bytes) {
-            last_gps_bytes = gps_stats.rx_bytes;
+        // fix): only a checksum-valid NAV-PVT counts as fresh.
+        if (gps_stats.sentences_ok != last_gps_frames) {
+            last_gps_frames = gps_stats.sentences_ok;
             loops_since_gps = 0;
         } else if (loops_since_gps < kGpsStaleLoops) {
             loops_since_gps++;

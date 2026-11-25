@@ -12,8 +12,16 @@ constexpr uint8_t kPvtClass = 0x01;
 constexpr uint8_t kPvtId    = 0x07;
 constexpr uint16_t kPvtLen  = 92;
 
+// Largest length accepted for a non-PVT message we skip over. A dropped
+// byte in the header (e.g. a UART overrun) shifts payload bytes into the
+// length field, and an unchecked 16-bit length could blind the parser for
+// up to 64 KB (~a minute at the PVT stream rate). Real u-blox messages this
+// module could plausibly emit (NAV-SAT, NAV-SIG, MON-VER) stay well under
+// this; anything bigger is treated as lost sync.
+constexpr uint16_t kMaxSkipLen = 1024;
+
 // "sentences" in Stats are UBX frames: ok = checksum-valid NAV-PVT, bad =
-// checksum failure.
+// checksum failure or an implausible length (lost sync).
 volatile uint32_t g_rx_bytes      = 0;
 volatile uint32_t g_sentences_ok  = 0;
 volatile uint32_t g_sentences_bad = 0;
@@ -71,6 +79,10 @@ void on_byte(uint8_t b) {
         if (s_class == kPvtClass && s_id == kPvtId && s_len == kPvtLen) {
             s_idx = 0;
             s_state = U_PAYLOAD;
+        } else if (s_len > kMaxSkipLen) {
+            // Corrupt header: resync on the next B5 62 instead of skipping.
+            g_sentences_bad++;
+            s_state = U_IDLE;
         } else {
             // Some other message (NAV-STATUS, etc.): skip payload + 2
             // checksum bytes without verifying it.

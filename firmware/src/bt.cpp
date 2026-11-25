@@ -22,8 +22,9 @@
 // and CRC-checks frames; RD32/WR32 execute in bt::poll() (main-loop
 // context, the same handoff pattern as gps.cpp), so the ISR stays short
 // next to the GPS and iBus ISRs. TX is a ring buffer drained by the TXE
-// interrupt; only the main loop enqueues (single producer), so the only
-// guard needed is cpsid/cpsie around head/TXEIE manipulation.
+// interrupt; only the main loop enqueues (single producer), so bytes are
+// copied with IRQs enabled and published by a single head store -- the only
+// cpsid/cpsie is around the few-cycle TXEIE read-modify-write.
 
 #include "bt.hpp"
 
@@ -91,14 +92,29 @@ uint32_t tx_free() {
 
 // Enqueue a whole run of bytes, all or nothing: a frame is never
 // half-queued. Main-loop context only. Returns false if it didn't fit.
+//
+// The copy runs with IRQs ENABLED: the TXE ISR only reads [tail, head), so
+// bytes written past head are invisible to it until head is published in
+// one aligned 32-bit store. Masking IRQs across a whole telemetry frame
+// (~150 B, ~280 us at 8 MHz -- over 3 byte times at 115200) overran the
+// USART1 (GPS) and USART3 (iBus) RX holding registers.
 bool tx_enqueue(const uint8_t* data, uint32_t n) {
     if (n > tx_free()) return false;
-    disable_irq();
+    uint32_t h = s_tx_head;
     for (uint32_t i = 0; i < n; ++i) {
-        s_tx_buf[s_tx_head] = data[i];
-        s_tx_head = (s_tx_head + 1) & (kTxRingSize - 1);
+        s_tx_buf[h] = data[i];
+        h = (h + 1) & (kTxRingSize - 1);
     }
-    mmio(USART2_CR1) |= USART2_CR1_TXEIE;  // TXE is level-high when DR is empty
+    // Compiler barrier: s_tx_buf isn't volatile, so its stores must be
+    // pinned before the head store that publishes them (single core -- no
+    // DMB needed for the ISR to observe them in order).
+    asm volatile("" ::: "memory");
+    s_tx_head = h;
+    // Only the CR1 read-modify-write needs IRQs off (a few cycles). If the
+    // ISR disabled TXEIE on an empty ring just before head moved, this
+    // re-enables it; TXE is level-high when DR is empty.
+    disable_irq();
+    mmio(USART2_CR1) |= USART2_CR1_TXEIE;
     enable_irq();
     return true;
 }

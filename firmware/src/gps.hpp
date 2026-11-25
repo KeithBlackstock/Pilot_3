@@ -18,7 +18,7 @@ namespace gps {
 struct Stats {
     uint32_t rx_bytes;
     uint32_t sentences_ok;   // checksum-valid NAV-PVT frames
-    uint32_t sentences_bad;  // frames that failed the checksum
+    uint32_t sentences_bad;  // frames that failed the checksum or had an implausible length
 };
 
 struct Fix {
